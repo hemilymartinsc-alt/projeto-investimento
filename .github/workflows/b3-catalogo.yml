@@ -35,3 +35,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python -m src.jobs.collect_b3_catalogo
+
+      - name: Consolidar cadastro mestre de ativos
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.jobs.consolidate_cadastro_mestre
