@@ -55,6 +55,12 @@ MIGRATION_010 = (
     / "migrations"
     / "010_limpar_mestre_sem_atividade_b3.sql"
 )
+MIGRATION_011 = (
+    Path(__file__).resolve().parents[1]
+    / "db"
+    / "migrations"
+    / "011_limpar_nao_canonicos_do_mestre.sql"
+)
 
 
 def instrument(
@@ -503,6 +509,40 @@ class ActivityGateAndSanityTest(unittest.TestCase):
         self.assertIn("for update of master", migration)
         self.assertNotIn("truncate", migration)
         self.assertNotIn("cascade", migration)
+
+    def test_noncanonical_cleanup_migration_is_dependency_safe(self):
+        migration = MIGRATION_011.read_text(encoding="utf-8").lower()
+        candidate_selection = migration.split("create unique index", 1)[0]
+        final_delete = migration[migration.rindex(
+            "delete from investimento.ativos"
+        ) :]
+
+        self.assertIn("where instrumento_canonico = false", candidate_selection)
+        self.assertIn("and elegivel_analise = false", candidate_selection)
+        self.assertNotIn("instrumento_canonico = true", migration)
+        self.assertIn("pg_constraint", migration)
+        self.assertIn("constraint_row.conkey", migration)
+        self.assertIn("constraint_row.confkey", migration)
+        self.assertIn("constraint_row.confrelid", migration)
+        self.assertIn("('ativo_id', 'id_ativo')", migration)
+        self.assertIn("for update of master", migration)
+        self.assertIn("master.instrumento_canonico = false", final_delete)
+        self.assertIn("master.elegivel_analise = false", final_delete)
+        self.assertIn("candidatos_iniciais=%", migration)
+        self.assertIn("protegidos_por_dependencia=%", migration)
+        self.assertIn("removidos=%", migration)
+        self.assertNotIn("investimento.b3_instrumentos_snapshot", migration)
+
+    def test_job_has_single_guarded_master_insert_route(self):
+        source = Path(job.__file__).read_text(encoding="utf-8").lower()
+        normalized_insert = " ".join(INSERT_NEW_SQL.lower().split())
+
+        self.assertEqual(source.count("insert into investimento.ativos"), 1)
+        self.assertIn("where d.instrumento_canonico = true", normalized_insert)
+        self.assertIn(
+            "and d.atividade_confirmada_b3 = true", normalized_insert
+        )
+        self.assertIn("and d.isin_valido = true", normalized_insert)
 
     def test_absent_asset_is_marked_without_delete(self):
         normalized_sql = " ".join(UPDATE_ABSENT_SQL.split())
