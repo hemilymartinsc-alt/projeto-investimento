@@ -24,6 +24,18 @@ ISIN_RE = re.compile(r"^[A-Z0-9]{12}$")
 REQUEST_TIMEOUT = (5, 15)
 DOWNLOAD_TIMEOUT = (5, 30)
 
+# Thresholds iniciais conservadores/fail-closed. Devem ser recalibrados apenas
+# com histórico real, sem substituir as comparações contra o último snapshot.
+MIN_SNAPSHOT_RECORDS = 100_000
+MAX_SNAPSHOT_VARIATION_RATIO = 0.15
+MAX_CANONICAL_VARIATION_RATIO = 0.20
+MAX_CONFIRMED_CANONICAL_VARIATION_RATIO = 0.15
+MAX_CONFIRMED_CLASS_VARIATION_RATIO = 0.25
+ESSENTIAL_B3_CATEGORIES = frozenset(
+    {"SHARES", "UNIT", "BDR", "FUNDS", "ETF EQUITIES"}
+)
+SANITY_CANONICAL_CLASSES = ("ACAO", "BDR", "ETF", "FUNDO")
+
 CANONICAL_SEGMENT = "CASH"
 CANONICAL_MARKET = "EQUITY-CASH"
 
@@ -132,9 +144,16 @@ SNAPSHOT_COPY_COLUMNS = (
     "subclasse_preliminar",
     "corrente",
     "motivo_validacao_b3",
+    "atividade_confirmada_b3",
+    "status_atividade_b3",
+    "motivo_atividade_b3",
     "isin_valido",
     "em_escopo_mestre",
 )
+
+
+class SnapshotSanityError(RuntimeError):
+    """Impede que uma coleta B3 inválida altere o estado vigente."""
 
 
 def progress(message: str) -> None:
@@ -343,6 +362,275 @@ def current(inst, ref):
     return activity_validation_issue(inst, ref) is None
 
 
+def activity_state(inst, ref):
+    issue = activity_validation_issue(inst, ref)
+    if issue is None:
+        return True, "CONFIRMADA", None
+    if issue == "DATA_INICIO_NAO_INFORMADA_B3":
+        return False, "PENDENTE_DATA_INICIO", issue
+    if issue == "INICIO_NEGOCIACAO_FUTURO":
+        return False, "INICIO_FUTURO", issue
+    if issue == "INATIVO_B3":
+        return False, "INATIVA_B3", issue
+    raise ValueError(f"Situação de atividade B3 desconhecida: {issue}")
+
+
+def snapshot_profile(instruments, ref=None):
+    categories = set()
+    total_canonical = 0
+    total_confirmed = 0
+    confirmed_classes = Counter()
+
+    for inst in instruments:
+        category = norm(inst.get("categoria_b3"))
+        if category:
+            categories.add(category)
+        if "instrumento_canonico" not in inst:
+            raise SnapshotSanityError(
+                "perfil canônico não calculado antes da sanidade"
+            )
+        if not inst["instrumento_canonico"]:
+            continue
+        total_canonical += 1
+        if inst.get("atividade_confirmada_b3"):
+            total_confirmed += 1
+            classe = inst.get("classe_preliminar")
+            if classe in SANITY_CANONICAL_CLASSES:
+                confirmed_classes[classe] += 1
+
+    return {
+        "data_referencia": str(ref) if ref is not None else None,
+        "total_registros": len(instruments),
+        "categorias": sorted(categories),
+        "total_canonicos": total_canonical,
+        "total_canonicos_confirmados": total_confirmed,
+        "canonicos_confirmados_por_classe": {
+            classe: confirmed_classes[classe]
+            for classe in SANITY_CANONICAL_CLASSES
+        },
+    }
+
+
+def check_sanity_variation(
+    errors,
+    variations,
+    rule,
+    current_value,
+    previous_value,
+    maximum_ratio,
+):
+    if previous_value is None:
+        return
+    if previous_value <= 0:
+        if current_value != previous_value:
+            errors.append(
+                f"sanidade[{rule}] anterior={previous_value} "
+                f"atual={current_value} variação=indeterminada "
+                f"limite={maximum_ratio:.2%}"
+            )
+        return
+
+    variation_ratio = abs(current_value - previous_value) / previous_value
+    variations[rule] = variation_ratio
+    if variation_ratio > maximum_ratio:
+        errors.append(
+            f"sanidade[{rule}] anterior={previous_value} "
+            f"atual={current_value} variação={variation_ratio:.2%} "
+            f"limite={maximum_ratio:.2%}"
+        )
+
+
+def validate_snapshot_sanity(
+    instruments, status, previous_profile=None, ref=None
+):
+    profile = snapshot_profile(instruments, ref)
+    errors = []
+
+    if status != "Final":
+        errors.append(f"status_arquivo={status!r}; esperado='Final'")
+
+    if profile["total_registros"] < MIN_SNAPSHOT_RECORDS:
+        errors.append(
+            "volume abaixo do mínimo absoluto: "
+            f"{profile['total_registros']} < {MIN_SNAPSHOT_RECORDS}"
+        )
+
+    missing_categories = sorted(
+        ESSENTIAL_B3_CATEGORIES - set(profile["categorias"])
+    )
+    if missing_categories:
+        errors.append(
+            "categorias essenciais ausentes: " + ", ".join(missing_categories)
+        )
+
+    variations = {}
+    if previous_profile is not None:
+        check_sanity_variation(
+            errors,
+            variations,
+            "snapshot_bruto",
+            profile["total_registros"],
+            previous_profile.get("total_registros"),
+            MAX_SNAPSHOT_VARIATION_RATIO,
+        )
+        check_sanity_variation(
+            errors,
+            variations,
+            "total_canonicos",
+            profile["total_canonicos"],
+            previous_profile.get("total_canonicos"),
+            MAX_CANONICAL_VARIATION_RATIO,
+        )
+        check_sanity_variation(
+            errors,
+            variations,
+            "canonicos_confirmados",
+            profile["total_canonicos_confirmados"],
+            previous_profile.get("total_canonicos_confirmados"),
+            MAX_CONFIRMED_CANONICAL_VARIATION_RATIO,
+        )
+        previous_classes = previous_profile.get(
+            "canonicos_confirmados_por_classe", {}
+        )
+        for classe in SANITY_CANONICAL_CLASSES:
+            check_sanity_variation(
+                errors,
+                variations,
+                f"canonicos_confirmados_classe_{classe}",
+                profile["canonicos_confirmados_por_classe"][classe],
+                previous_classes.get(classe),
+                MAX_CONFIRMED_CLASS_VARIATION_RATIO,
+            )
+
+    result = {
+        **profile,
+        "snapshot_anterior": previous_profile,
+        "variacoes_percentuais_absolutas": variations,
+        "valido": not errors,
+        "erros": errors,
+    }
+    if errors:
+        raise SnapshotSanityError("; ".join(errors))
+    return result
+
+
+def load_latest_valid_snapshot_profile(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            with ultima_referencia as (
+                select max(data_referencia) as data_referencia
+                from investimento.b3_instrumentos_snapshot
+                where status_arquivo = 'Final'
+            ), snapshot_atual as (
+                select
+                    s.*,
+                    (
+                        s.instrumento_canonico = true
+                        and nullif(
+                            s.data_inicio_negociacao,
+                            date '9999-12-31'
+                        ) is not null
+                        and nullif(
+                            s.data_inicio_negociacao,
+                            date '9999-12-31'
+                        ) <= s.data_referencia
+                        and (
+                            nullif(
+                                s.data_fim_negociacao,
+                                date '9999-12-31'
+                            ) is null
+                            or nullif(
+                                s.data_fim_negociacao,
+                                date '9999-12-31'
+                            ) >= s.data_referencia
+                        )
+                        and (
+                            nullif(
+                                s.data_expiracao,
+                                date '9999-12-31'
+                            ) is null
+                            or nullif(
+                                s.data_expiracao,
+                                date '9999-12-31'
+                            ) >= s.data_referencia
+                        )
+                    ) as atividade_confirmada,
+                    case
+                        when upper(trim(s.categoria_b3)) in (
+                            'SHARES', 'UNIT'
+                        ) then 'ACAO'
+                        when upper(trim(s.categoria_b3)) = 'BDR'
+                            then 'BDR'
+                        when upper(trim(s.categoria_b3)) like 'ETF%'
+                          or upper(trim(s.categoria_b3)) =
+                             'FIXED INCOME TRADABLE INSTRUMENT T1'
+                            then 'ETF'
+                        when upper(trim(s.categoria_b3)) = 'FUNDS'
+                            then 'FUNDO'
+                        else 'OUTRO'
+                    end as classe_preliminar
+                from investimento.b3_instrumentos_snapshot s
+                join ultima_referencia u
+                  on u.data_referencia = s.data_referencia
+                where s.status_arquivo = 'Final'
+            )
+            select
+                u.data_referencia,
+                count(s.ticker) as total_registros,
+                coalesce(
+                    array_agg(
+                        distinct upper(trim(s.categoria_b3))
+                        order by upper(trim(s.categoria_b3))
+                    ) filter (where s.categoria_b3 is not null),
+                    array[]::text[]
+                ) as categorias,
+                count(*) filter (
+                    where s.instrumento_canonico = true
+                ) as total_canonicos,
+                count(*) filter (
+                    where s.atividade_confirmada = true
+                ) as total_canonicos_confirmados,
+                count(*) filter (
+                    where s.atividade_confirmada = true
+                      and s.classe_preliminar = 'ACAO'
+                ) as acoes_confirmadas,
+                count(*) filter (
+                    where s.atividade_confirmada = true
+                      and s.classe_preliminar = 'BDR'
+                ) as bdrs_confirmados,
+                count(*) filter (
+                    where s.atividade_confirmada = true
+                      and s.classe_preliminar = 'ETF'
+                ) as etfs_confirmados,
+                count(*) filter (
+                    where s.atividade_confirmada = true
+                      and s.classe_preliminar = 'FUNDO'
+                ) as fundos_confirmados
+            from ultima_referencia u
+            left join snapshot_atual s on true
+            group by u.data_referencia
+            """
+        )
+        row = cur.fetchone()
+
+    if not row or row[0] is None:
+        return None
+    return {
+        "data_referencia": str(row[0]),
+        "total_registros": row[1],
+        "categorias": list(row[2]),
+        "total_canonicos": row[3],
+        "total_canonicos_confirmados": row[4],
+        "canonicos_confirmados_por_classe": {
+            "ACAO": row[5],
+            "BDR": row[6],
+            "ETF": row[7],
+            "FUNDO": row[8],
+        },
+    }
+
+
 def valid_isin(inst):
     isin = inst.get("isin")
     return bool(isin and ISIN_RE.fullmatch(isin))
@@ -465,11 +753,18 @@ def annotate_universe(instruments, ref):
         inst["tipo_variante_b3"] = variant
         inst["classe_preliminar"] = classe
         inst["subclasse_preliminar"] = subclasse
-        validation_issue = activity_validation_issue(inst, ref)
-        inst["corrente"] = validation_issue is None
+        (
+            activity_confirmed,
+            activity_status,
+            activity_reason,
+        ) = activity_state(inst, ref)
+        inst["corrente"] = activity_confirmed
         inst["motivo_validacao_b3"] = (
-            validation_issue if is_canonical else None
+            activity_reason if is_canonical else None
         )
+        inst["atividade_confirmada_b3"] = activity_confirmed
+        inst["status_atividade_b3"] = activity_status
+        inst["motivo_atividade_b3"] = activity_reason
         inst["isin_valido"] = valid_isin(inst)
         if is_canonical:
             canonical_tickers_by_isin[inst["isin"]].add(inst["ticker"])
@@ -522,6 +817,9 @@ def snapshot_row(inst):
         inst.get("subclasse_preliminar"),
         inst["corrente"],
         inst.get("motivo_validacao_b3"),
+        inst["atividade_confirmada_b3"],
+        inst["status_atividade_b3"],
+        inst.get("motivo_atividade_b3"),
         inst["isin_valido"],
         inst["em_escopo_mestre"],
     )
@@ -565,6 +863,9 @@ def save_snapshot(conn, instruments, ref):
                 subclasse_preliminar text,
                 corrente boolean not null,
                 motivo_validacao_b3 text,
+                atividade_confirmada_b3 boolean not null,
+                status_atividade_b3 text not null,
+                motivo_atividade_b3 text,
                 isin_valido boolean not null,
                 em_escopo_mestre boolean not null
             ) on commit drop
@@ -620,6 +921,7 @@ def save_snapshot(conn, instruments, ref):
             create temporary table tmp_b3_decisions as
             select distinct on (ticker)
                 ticker,
+                data_referencia,
                 isin,
                 coalesce(
                     nome_corporativo,
@@ -639,6 +941,9 @@ def save_snapshot(conn, instruments, ref):
                 ticker_canonico,
                 corrente,
                 motivo_validacao_b3,
+                atividade_confirmada_b3,
+                status_atividade_b3,
+                motivo_atividade_b3,
                 isin_valido,
                 em_escopo_mestre
             from tmp_b3_snapshot
@@ -664,6 +969,7 @@ def build_audit(instruments):
     canonical_classes = Counter()
     confirmed_canonical_classes = Counter()
     pending_start_classes = Counter()
+    canonical_activity_statuses = Counter()
     canonical_etfs = Counter()
     non_canonical_reasons = Counter()
     examples = defaultdict(list)
@@ -672,6 +978,7 @@ def build_audit(instruments):
     for inst in instruments:
         if inst["instrumento_canonico"]:
             canonical_classes[inst["classe_preliminar"]] += 1
+            canonical_activity_statuses[inst["status_atividade_b3"]] += 1
             if inst["corrente"]:
                 confirmed_canonical_classes[inst["classe_preliminar"]] += 1
             elif (
@@ -706,16 +1013,15 @@ def build_audit(instruments):
                 "encontrado": True,
                 "instrumento_canonico": inst["instrumento_canonico"],
                 "tipo_variante_b3": inst.get("tipo_variante_b3"),
-                "atividade_b3_confirmada": inst["corrente"],
-                "motivo_validacao_b3": inst.get("motivo_validacao_b3"),
+                "atividade_confirmada_b3": inst[
+                    "atividade_confirmada_b3"
+                ],
+                "status_atividade_b3": inst["status_atividade_b3"],
+                "motivo_atividade_b3": inst.get("motivo_atividade_b3"),
                 "status_validacao_proposto": (
                     "VALIDADO_B3"
-                    if inst["instrumento_canonico"] and inst["corrente"]
-                    else (
-                        "DUVIDOSO"
-                        if inst["instrumento_canonico"]
-                        else "NAO_CANONICO"
-                    )
+                    if inst["instrumento_canonico"]
+                    else "NAO_CANONICO"
                 ),
                 "ticker_canonico": inst.get("ticker_canonico"),
                 "classe_preliminar": inst["classe_preliminar"],
@@ -760,6 +1066,9 @@ def build_audit(instruments):
         "total_canonicos_outras_pendencias": (
             total_canonical - total_confirmed - total_pending_start
         ),
+        "distribuicao_status_atividade_canonicos": dict(
+            canonical_activity_statuses.most_common()
+        ),
         "etfs_canonicos_renda_variavel": canonical_etfs["RENDA_VARIAVEL"],
         "etfs_canonicos_renda_fixa": canonical_etfs["RENDA_FIXA"],
         "etfs_canonicos_total": sum(canonical_etfs.values()),
@@ -797,6 +1106,14 @@ def emit_audit(audit):
         "AUDITORIA | pendentes_data_inicio_por_classe="
         + json.dumps(
             audit["distribuicao_pendentes_data_inicio_classe"],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    progress(
+        "AUDITORIA | status_atividade_canonicos="
+        + json.dumps(
+            audit["distribuicao_status_atividade_canonicos"],
             ensure_ascii=False,
             sort_keys=True,
         )
@@ -842,14 +1159,14 @@ select
         select count(*)
         from tmp_b3_decisions d
         where d.instrumento_canonico
-          and d.corrente
+          and d.atividade_confirmada_b3
           and d.isin_valido
     ) as canonicos_confirmados_b3,
     (
         select count(*)
         from tmp_b3_decisions d
         where d.instrumento_canonico
-          and d.motivo_validacao_b3 = 'DATA_INICIO_NAO_INFORMADA_B3'
+          and d.status_atividade_b3 = 'PENDENTE_DATA_INICIO'
           and d.isin_valido
     ) as canonicos_pendentes_data_inicio,
     (
@@ -885,7 +1202,7 @@ select
         left join investimento.ativos a
           on upper(trim(a.ticker)) = d.ticker
         where d.instrumento_canonico
-          and d.corrente
+          and d.atividade_confirmada_b3
           and d.isin_valido
           and (
               a.ticker is null
@@ -910,14 +1227,35 @@ select
     (
         select count(*)
         from investimento.ativos a
-        where a.isin is not null
-          and trim(a.isin) <> ''
-          and not exists (
+        where not exists (
               select 1
               from tmp_b3_decisions d
               where d.ticker = upper(trim(a.ticker))
           )
-    ) as inativos
+    ) as ausentes_b3_atual
+"""
+
+
+PREPARE_PREVIOUS_STATE_SQL = """
+create temporary table tmp_b3_previous
+on commit drop
+as
+select distinct on (upper(trim(ticker)))
+    upper(trim(ticker)) as ticker,
+    atividade_confirmada_b3,
+    status_atividade_b3,
+    elegivel_analise,
+    instrumento_canonico,
+    nome,
+    nome_pregao,
+    tipo_instrumento,
+    categoria_b3,
+    segmento_b3,
+    mercado_b3,
+    moeda,
+    ticker_canonico
+from investimento.ativos
+order by upper(trim(ticker)), atualizado_em desc nulls last, id desc
 """
 
 
@@ -939,34 +1277,25 @@ update investimento.ativos a
        mercado_b3 = d.mercado_b3,
        moeda = coalesce(d.moeda, a.moeda),
        isin = d.isin,
-       ativo = case
-           when a.status_validacao = 'VALIDADO_OFICIAL' then a.ativo
-           else d.corrente
-       end,
+       ativo = d.atividade_confirmada_b3,
        instrumento_canonico = true,
        tipo_variante_b3 = null,
        ticker_canonico = d.ticker,
        elegivel_analise = case
-           when a.status_validacao = 'VALIDADO_OFICIAL'
-               then a.elegivel_analise
+           when a.elegivel_analise = true
+            and a.status_validacao = 'VALIDADO_OFICIAL'
+            and d.atividade_confirmada_b3 = true then true
            else false
        end,
        status_validacao = case
            when a.status_validacao = 'VALIDADO_OFICIAL'
                then 'VALIDADO_OFICIAL'
-           when d.corrente then 'VALIDADO_B3'
-           when d.motivo_validacao_b3 = 'INATIVO_B3' then 'INATIVO'
-           else 'DUVIDOSO'
+           else 'VALIDADO_B3'
        end,
        motivo_exclusao = case
            when a.status_validacao = 'VALIDADO_OFICIAL'
                then a.motivo_exclusao
-           when d.corrente
-               then 'Canônico na B3; aguarda validações oficiais complementares obrigatórias da classe.'
-           else concat(
-               d.motivo_validacao_b3,
-               '; instrumento estruturalmente canônico; atividade aguarda confirmação oficial complementar (COTAHIST/B3, CVM ou fonte oficial da classe).'
-           )
+           else 'Canônico na B3; aguarda validações oficiais complementares obrigatórias da classe.'
        end,
        fonte_validacao = case
            when a.status_validacao = 'VALIDADO_OFICIAL'
@@ -978,6 +1307,15 @@ update investimento.ativos a
                then a.validado_em
            else now()
        end,
+       atividade_confirmada_b3 = d.atividade_confirmada_b3,
+       status_atividade_b3 = d.status_atividade_b3,
+       motivo_atividade_b3 = d.motivo_atividade_b3,
+       data_referencia_b3 = d.data_referencia,
+       ultima_confirmacao_b3 = case
+           when d.atividade_confirmada_b3 then now()
+           else a.ultima_confirmacao_b3
+       end,
+       verificado_b3_em = now(),
        atualizado_em = now()
   from tmp_b3_decisions d
  where d.ticker = upper(trim(a.ticker))
@@ -1012,6 +1350,15 @@ update investimento.ativos a
        ),
        fonte_validacao = %(source_code)s,
        validado_em = now(),
+       atividade_confirmada_b3 = d.atividade_confirmada_b3,
+       status_atividade_b3 = d.status_atividade_b3,
+       motivo_atividade_b3 = d.motivo_atividade_b3,
+       data_referencia_b3 = d.data_referencia,
+       ultima_confirmacao_b3 = case
+           when d.atividade_confirmada_b3 then now()
+           else a.ultima_confirmacao_b3
+       end,
+       verificado_b3_em = now(),
        atualizado_em = now()
   from tmp_b3_decisions d
  where d.ticker = upper(trim(a.ticker))
@@ -1033,7 +1380,11 @@ update investimento.ativos a
 
 UPDATE_DIVERGENT_SQL = """
 update investimento.ativos a
-   set ativo = false,
+   set nome = coalesce(d.nome, a.nome),
+       nome_pregao = coalesce(d.nome_pregao, a.nome_pregao),
+       tipo_instrumento = d.categoria_b3,
+       moeda = coalesce(d.moeda, a.moeda),
+       ativo = d.atividade_confirmada_b3,
        instrumento_canonico = d.instrumento_canonico,
        tipo_variante_b3 = d.tipo_variante_b3,
        ticker_canonico = d.ticker_canonico,
@@ -1045,6 +1396,15 @@ update investimento.ativos a
        mercado_b3 = d.mercado_b3,
        fonte_validacao = %(source_code)s,
        validado_em = now(),
+       atividade_confirmada_b3 = d.atividade_confirmada_b3,
+       status_atividade_b3 = d.status_atividade_b3,
+       motivo_atividade_b3 = d.motivo_atividade_b3,
+       data_referencia_b3 = d.data_referencia,
+       ultima_confirmacao_b3 = case
+           when d.atividade_confirmada_b3 then now()
+           else a.ultima_confirmacao_b3
+       end,
+       verificado_b3_em = now(),
        atualizado_em = now()
  from tmp_b3_decisions d
  where d.ticker = upper(trim(a.ticker))
@@ -1057,7 +1417,14 @@ update investimento.ativos a
 
 UPDATE_INVALID_OFFICIAL_ID_SQL = """
 update investimento.ativos a
-   set ativo = false,
+   set nome = coalesce(d.nome, a.nome),
+       nome_pregao = coalesce(d.nome_pregao, a.nome_pregao),
+       tipo_instrumento = d.categoria_b3,
+       categoria_b3 = d.categoria_b3,
+       segmento_b3 = d.segmento_b3,
+       mercado_b3 = d.mercado_b3,
+       moeda = coalesce(d.moeda, a.moeda),
+       ativo = false,
        instrumento_canonico = false,
        tipo_variante_b3 = null,
        ticker_canonico = null,
@@ -1066,6 +1433,15 @@ update investimento.ativos a
        motivo_exclusao = 'Ticker encontrado na B3 sem ISIN oficial válido.',
        fonte_validacao = %(source_code)s,
        validado_em = now(),
+       atividade_confirmada_b3 = d.atividade_confirmada_b3,
+       status_atividade_b3 = d.status_atividade_b3,
+       motivo_atividade_b3 = d.motivo_atividade_b3,
+       data_referencia_b3 = d.data_referencia,
+       ultima_confirmacao_b3 = case
+           when d.atividade_confirmada_b3 then now()
+           else a.ultima_confirmacao_b3
+       end,
+       verificado_b3_em = now(),
        atualizado_em = now()
  from tmp_b3_decisions d
  where d.ticker = upper(trim(a.ticker))
@@ -1089,18 +1465,76 @@ update investimento.ativos
 """
 
 
-UPDATE_INACTIVE_SQL = """
+UPDATE_PRESENT_WITHOUT_ISIN_SQL = """
+update investimento.ativos a
+   set nome = coalesce(d.nome, a.nome),
+       nome_pregao = coalesce(d.nome_pregao, a.nome_pregao),
+       tipo_instrumento = d.categoria_b3,
+       categoria_b3 = d.categoria_b3,
+       segmento_b3 = d.segmento_b3,
+       mercado_b3 = d.mercado_b3,
+       moeda = coalesce(d.moeda, a.moeda),
+       atividade_confirmada_b3 = d.atividade_confirmada_b3,
+       status_atividade_b3 = d.status_atividade_b3,
+       motivo_atividade_b3 = d.motivo_atividade_b3,
+       data_referencia_b3 = d.data_referencia,
+       ultima_confirmacao_b3 = case
+           when d.atividade_confirmada_b3 then now()
+           else a.ultima_confirmacao_b3
+       end,
+       verificado_b3_em = now(),
+       atualizado_em = now()
+  from tmp_b3_decisions d
+ where d.ticker = upper(trim(a.ticker))
+   and (a.isin is null or trim(a.isin) = '')
+"""
+
+
+UPDATE_PRESENT_B3_STATE_SQL = """
+update investimento.ativos a
+   set nome = coalesce(d.nome, a.nome),
+       nome_pregao = coalesce(d.nome_pregao, a.nome_pregao),
+       tipo_instrumento = d.categoria_b3,
+       categoria_b3 = d.categoria_b3,
+       segmento_b3 = d.segmento_b3,
+       mercado_b3 = d.mercado_b3,
+       moeda = coalesce(d.moeda, a.moeda),
+       ticker_canonico = d.ticker_canonico,
+       elegivel_analise = case
+           when a.elegivel_analise = true
+            and a.instrumento_canonico = true
+            and a.status_validacao = 'VALIDADO_OFICIAL'
+            and d.atividade_confirmada_b3 = true then true
+           else false
+       end,
+       atividade_confirmada_b3 = d.atividade_confirmada_b3,
+       status_atividade_b3 = d.status_atividade_b3,
+       motivo_atividade_b3 = d.motivo_atividade_b3,
+       data_referencia_b3 = d.data_referencia,
+       ultima_confirmacao_b3 = case
+           when d.atividade_confirmada_b3 then now()
+           else a.ultima_confirmacao_b3
+       end,
+       verificado_b3_em = now(),
+       atualizado_em = now()
+  from tmp_b3_decisions d
+ where d.ticker = upper(trim(a.ticker))
+"""
+
+
+UPDATE_ABSENT_SQL = """
 update investimento.ativos a
    set ativo = false,
        elegivel_analise = false,
-       status_validacao = 'INATIVO',
-       motivo_exclusao = 'Ticker não encontrado como instrumento corrente no último cadastro oficial da B3.',
-       fonte_validacao = %(source_code)s,
-       validado_em = now(),
+       atividade_confirmada_b3 = false,
+       status_atividade_b3 = 'AUSENTE_B3_ATUAL',
+       motivo_atividade_b3 = 'Ticker ausente do último snapshot oficial válido da B3.',
+       data_referencia_b3 = (
+           select max(data_referencia) from tmp_b3_decisions
+       ),
+       verificado_b3_em = now(),
        atualizado_em = now()
- where a.isin is not null
-   and trim(a.isin) <> ''
-   and not exists (
+ where not exists (
        select 1
        from tmp_b3_decisions d
        where d.ticker = upper(trim(a.ticker))
@@ -1114,7 +1548,10 @@ insert into investimento.ativos (
     moeda, ativo, isin, fonte_cadastro, url_fonte, categoria_b3,
     segmento_b3, mercado_b3, instrumento_canonico, tipo_variante_b3,
     ticker_canonico, status_validacao, elegivel_analise,
-    motivo_exclusao, fonte_validacao, validado_em, atualizado_em
+    motivo_exclusao, fonte_validacao, validado_em,
+    atividade_confirmada_b3, status_atividade_b3, motivo_atividade_b3,
+    data_referencia_b3, ultima_confirmacao_b3, verificado_b3_em,
+    atualizado_em
 )
 select
     d.ticker,
@@ -1124,7 +1561,7 @@ select
     d.subclasse_preliminar,
     d.categoria_b3,
     coalesce(d.moeda, 'BRL'),
-    d.instrumento_canonico and d.corrente,
+    d.instrumento_canonico and d.atividade_confirmada_b3,
     d.isin,
     %(source_code)s,
     %(source_url)s,
@@ -1134,22 +1571,13 @@ select
     d.instrumento_canonico,
     d.tipo_variante_b3,
     d.ticker_canonico,
-    case
-        when d.instrumento_canonico and d.corrente then 'VALIDADO_B3'
-        when d.instrumento_canonico
-             and d.motivo_validacao_b3 = 'INATIVO_B3' then 'INATIVO'
-        when d.instrumento_canonico then 'DUVIDOSO'
-        else 'NAO_CANONICO'
+    case when d.instrumento_canonico then 'VALIDADO_B3'
+         else 'NAO_CANONICO'
     end,
     false,
     case
-        when d.instrumento_canonico and d.corrente
-            then 'Canônico na B3; aguarda validações oficiais complementares obrigatórias da classe.'
         when d.instrumento_canonico
-            then concat(
-                d.motivo_validacao_b3,
-                '; instrumento estruturalmente canônico; atividade aguarda confirmação oficial complementar (COTAHIST/B3, CVM ou fonte oficial da classe).'
-            )
+            then 'Canônico na B3; aguarda validações oficiais complementares obrigatórias da classe.'
         else concat(
             'Instrumento B3 não canônico: ',
             d.tipo_variante_b3,
@@ -1157,6 +1585,12 @@ select
         )
     end,
     %(source_code)s,
+    now(),
+    d.atividade_confirmada_b3,
+    d.status_atividade_b3,
+    d.motivo_atividade_b3,
+    d.data_referencia,
+    case when d.atividade_confirmada_b3 then now() else null end,
     now(),
     now()
 from tmp_b3_decisions d
@@ -1170,9 +1604,59 @@ on conflict (ticker) do nothing
 """
 
 
+TRANSITIONS_SQL = """
+select
+    count(*) filter (
+        where p.ticker is not null
+          and p.atividade_confirmada_b3 = false
+          and a.atividade_confirmada_b3 = true
+    ) as atividade_false_para_true,
+    count(*) filter (
+        where p.ticker is not null
+          and p.atividade_confirmada_b3 = true
+          and a.atividade_confirmada_b3 = false
+    ) as atividade_true_para_false,
+    count(*) filter (
+        where p.ticker is null
+          and a.instrumento_canonico = true
+          and a.atividade_confirmada_b3 = true
+    ) as novos_tickers_canonicos_ativos,
+    count(*) filter (
+        where a.status_atividade_b3 = 'AUSENTE_B3_ATUAL'
+          and p.status_atividade_b3 is distinct from 'AUSENTE_B3_ATUAL'
+    ) as agora_ausentes_b3,
+    count(*) filter (
+        where a.status_atividade_b3 = 'INATIVA_B3'
+          and p.status_atividade_b3 is distinct from 'INATIVA_B3'
+    ) as agora_inativos_b3,
+    count(*) filter (
+        where p.ticker is not null
+          and (
+              a.nome is distinct from p.nome
+              or a.nome_pregao is distinct from p.nome_pregao
+              or a.tipo_instrumento is distinct from p.tipo_instrumento
+              or a.categoria_b3 is distinct from p.categoria_b3
+              or a.segmento_b3 is distinct from p.segmento_b3
+              or a.mercado_b3 is distinct from p.mercado_b3
+              or a.moeda is distinct from p.moeda
+              or a.ticker_canonico is distinct from p.ticker_canonico
+          )
+    ) as alteracoes_campos_b3
+from investimento.ativos a
+left join tmp_b3_previous p
+  on p.ticker = upper(trim(a.ticker))
+where a.data_referencia_b3 = (
+    select max(data_referencia) from tmp_b3_decisions
+)
+"""
+
+
 def validate_master(conn):
     progress("aplicando universo canônico ao cadastro mestre em operações set-based")
     with conn.cursor() as cur:
+        cur.execute(PREPARE_PREVIOUS_STATE_SQL)
+        cur.execute("create unique index on tmp_b3_previous (ticker)")
+        cur.execute("analyze tmp_b3_previous")
         cur.execute(COUNTS_SQL)
         columns = [description.name for description in cur.description]
         counts = dict(zip(columns, cur.fetchone()))
@@ -1185,14 +1669,60 @@ def validate_master(conn):
         cur.execute(UPDATE_DIVERGENT_SQL, params)
         cur.execute(UPDATE_INVALID_OFFICIAL_ID_SQL, params)
         cur.execute(UPDATE_WITHOUT_ISIN_SQL, params)
-        cur.execute(UPDATE_INACTIVE_SQL, params)
+        cur.execute(UPDATE_PRESENT_WITHOUT_ISIN_SQL, params)
+        cur.execute(UPDATE_PRESENT_B3_STATE_SQL, params)
+        cur.execute(UPDATE_ABSENT_SQL, params)
         cur.execute(INSERT_NEW_SQL, params)
+        cur.execute(TRANSITIONS_SQL)
+        transition_columns = [
+            description.name for description in cur.description
+        ]
+        transitions = dict(zip(transition_columns, cur.fetchone()))
+
+    counts.update(transitions)
 
     progress(
         "cadastro mestre atualizado: "
         + " ".join(f"{key}={value}" for key, value in counts.items())
     )
     return counts
+
+
+def process_snapshot(conn, instruments, ref, status):
+    """Valida integralmente antes da primeira mutação e grava em uma transação."""
+    previous_profile = load_latest_valid_snapshot_profile(conn)
+    annotate_universe(instruments, ref)
+    sanity = validate_snapshot_sanity(
+        instruments,
+        status,
+        previous_profile=previous_profile,
+        ref=ref,
+    )
+    progress(
+        "sanidade aprovada antes de qualquer mutação: "
+        f"status={status} linhas={len(instruments)} "
+        f"referencia_anterior="
+        f"{(previous_profile or {}).get('data_referencia')} "
+        "variacoes="
+        + json.dumps(
+            sanity["variacoes_percentuais_absolutas"],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+    audit = build_audit(instruments)
+    progress(
+        "normalização concluída: "
+        f"linhas={len(instruments)} "
+        f"canonicos={audit['total_canonico']} "
+        f"nao_canonicos={audit['total_nao_canonico']}"
+    )
+
+    snapshot_count = save_snapshot(conn, instruments, ref)
+    counts = validate_master(conn)
+    conn.commit()
+    return sanity, audit, snapshot_count, counts
 
 
 def log_start(conn):
@@ -1242,18 +1772,9 @@ def main():
         progress("normalizando arquivo oficial completo")
         instruments = [normalize(row, ref, status) for row in raw]
         del raw
-        annotate_universe(instruments, ref)
-        audit = build_audit(instruments)
-        progress(
-            "normalização concluída: "
-            f"linhas={len(instruments)} "
-            f"canonicos={audit['total_canonico']} "
-            f"nao_canonicos={audit['total_nao_canonico']}"
+        sanity, audit, snapshot_count, counts = process_snapshot(
+            conn, instruments, ref, status
         )
-
-        snapshot_count = save_snapshot(conn, instruments, ref)
-        counts = validate_master(conn)
-        conn.commit()
 
         result = {
             "data_referencia": str(ref),
@@ -1274,6 +1795,9 @@ def main():
             "distribuicao_pendentes_data_inicio_classe": audit[
                 "distribuicao_pendentes_data_inicio_classe"
             ],
+            "distribuicao_status_atividade_canonicos": audit[
+                "distribuicao_status_atividade_canonicos"
+            ],
             "etfs_canonicos_renda_variavel": audit[
                 "etfs_canonicos_renda_variavel"
             ],
@@ -1284,6 +1808,7 @@ def main():
             "distribuicao_nao_canonicos_motivo": audit[
                 "distribuicao_nao_canonicos_motivo"
             ],
+            "sanidade_snapshot": sanity,
             **counts,
         }
         message = json.dumps(result, ensure_ascii=False, sort_keys=True)
