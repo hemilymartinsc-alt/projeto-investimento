@@ -6,6 +6,7 @@ import json
 import re
 import sys
 import unicodedata
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -23,7 +24,89 @@ ISIN_RE = re.compile(r"^[A-Z0-9]{12}$")
 REQUEST_TIMEOUT = (5, 15)
 DOWNLOAD_TIMEOUT = (5, 30)
 
-SNAPSHOT_COLUMNS = (
+CANONICAL_SEGMENT = "CASH"
+CANONICAL_MARKET = "EQUITY-CASH"
+
+# Exceção oficial e auditável para ETFs de renda fixa. O registro negociável
+# só é aceito quando possui o mesmo ISIN e ativo-base de um registro técnico
+# ETF PRIMARY MARKET presente no próprio InstrumentsConsolidated.
+FIXED_INCOME_ETF_SEGMENT = "FORWARD"
+FIXED_INCOME_ETF_MARKET = "FIXED INCOME"
+FIXED_INCOME_ETF_CATEGORY = "FIXED INCOME TRADABLE INSTRUMENT T1"
+FIXED_INCOME_ETF_PRIMARY_SEGMENT = "ETF PRIMARY MARKET"
+FIXED_INCOME_ETF_PRIMARY_CATEGORY_PREFIX = "ETF PRIMARY MARKET"
+
+NON_CANONICAL_SEGMENTS = {
+    "EQUITY BLOCK TRADING LOT": "EQUITY_BLOCK_TRADING_LOT",
+    "ETF PRIMARY MARKET": "ETF_PRIMARY_MARKET",
+    "ODD LOT": "ODD_LOT",
+}
+
+NON_CANONICAL_CATEGORIES = {
+    "RIGHTS": "RIGHTS",
+    "RECEIPTS": "RECEIPTS",
+    "WARRANT": "WARRANT",
+    "INDEX": "INDEX",
+}
+
+DERIVATIVE_SEGMENTS = {
+    "AGRIBUSINESS",
+    "EQUITY CALL",
+    "EQUITY FORWARD",
+    "EQUITY PUT",
+    "FINANCIAL",
+    "FORWARD",
+}
+
+DERIVATIVE_MARKETS = {
+    "EQUITY-DERIVATE",
+    "FORWARD",
+    "FUTURE",
+    "OPTIONS ON FUTURE",
+    "OPTIONS ON SPOT",
+}
+
+DERIVATIVE_CATEGORY_TERMS = (
+    "OPTION",
+    "FUTURE",
+    "FORWARD",
+    "SWAP",
+    "SECURITY LENDING",
+    "EXERCISE",
+)
+
+B3_NULL_DATE = datetime.max.date()
+
+# Variantes listadas que devem ser registradas no mestre para que recebam
+# explicitamente o status NAO_CANONICO. Derivativos continuam apenas no snapshot.
+MASTER_NON_CANONICAL_VARIANTS = frozenset(
+    {
+        *NON_CANONICAL_SEGMENTS.values(),
+        *NON_CANONICAL_CATEGORIES.values(),
+    }
+)
+
+AUDIT_TICKERS = (
+    "PETR4",
+    "VALE3",
+    "SANB11",
+    "HGLG11",
+    "KNRI11",
+    "BOVA11",
+    "IVVB11",
+    "AADA39",
+    "AFHI11",
+    "AFHI11M",
+    "LFTI11",
+    "LFTS11",
+    "IMAB11",
+    "B5P211",
+    "003H11",
+    "0FEA11",
+    "2WAV3",
+)
+
+SNAPSHOT_COPY_COLUMNS = (
     "data_referencia",
     "ticker",
     "isin",
@@ -42,20 +125,15 @@ SNAPSHOT_COLUMNS = (
     "data_expiracao",
     "status_arquivo",
     "raw_json",
-)
-
-CANDIDATE_COLUMNS = (
-    "ticker",
-    "isin",
-    "nome",
-    "nome_pregao",
-    "classe",
-    "subclasse",
-    "tipo_instrumento",
-    "categoria_b3",
-    "segmento_b3",
-    "mercado_b3",
-    "moeda",
+    "instrumento_canonico",
+    "tipo_variante_b3",
+    "ticker_canonico",
+    "classe_preliminar",
+    "subclasse_preliminar",
+    "corrente",
+    "motivo_validacao_b3",
+    "isin_valido",
+    "em_escopo_mestre",
 )
 
 
@@ -63,35 +141,40 @@ def progress(message: str) -> None:
     print(f"B3 instrumentos: {message}", flush=True)
 
 
-def clean(v):
-    if v is None:
+def clean(value):
+    if value is None:
         return None
-    s = str(v).strip()
-    return s or None
+    text = str(value).strip()
+    return text or None
 
 
-def upper(v):
-    s = clean(v)
-    return s.upper() if s else None
+def upper(value):
+    text = clean(value)
+    return text.upper() if text else None
 
 
-def norm(v):
-    s = upper(v) or ""
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    return re.sub(r"\s+", " ", s).strip()
+def norm(value):
+    text = upper(value) or ""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", text).strip()
 
 
-def parse_date(v):
-    s = clean(v)
-    if not s:
+def parse_date(value):
+    text = clean(value)
+    if not text:
         return None
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
+    for date_format in ("%Y-%m-%d", "%d/%m/%Y", "%Y/%m/%d"):
         try:
-            return datetime.strptime(s[:10], fmt).date()
+            return datetime.strptime(text[:10], date_format).date()
         except ValueError:
             pass
     return None
+
+
+def parse_b3_date(value):
+    parsed = parse_date(value)
+    return None if parsed == B3_NULL_DATE else parsed
 
 
 def pick(row, *keys):
@@ -106,6 +189,7 @@ def parse_csv(content: bytes):
     lines = text.splitlines()
     status = None
     header = None
+
     for index, line in enumerate(lines):
         normalized = norm(line)
         if "STATUS DO ARQUIVO" in normalized:
@@ -121,11 +205,14 @@ def parse_csv(content: bytes):
         if "TckrSymb" in fields and "ISIN" in fields:
             header = index
             break
+
     if header is None:
         raise RuntimeError("Cabeçalho TckrSymb/ISIN não encontrado no arquivo B3.")
+
     reader = csv.DictReader(
         io.StringIO("\n".join(lines[header:])), delimiter=";"
     )
+    # O ticker é obrigatório no schema bruto e identifica cada instrumento B3.
     return status, [dict(row) for row in reader if upper(row.get("TckrSymb"))]
 
 
@@ -215,146 +302,204 @@ def normalize(row, ref, status):
                 "CorporateGovernanceLevelName",
             )
         ),
-        "data_inicio_negociacao": parse_date(
-            pick(row, "TrdgStartDt", "TradingStartDate")
+        "data_inicio_negociacao": parse_b3_date(
+            pick(row, "TradgStartDt", "TrdgStartDt", "TradingStartDate")
         ),
-        "data_fim_negociacao": parse_date(
-            pick(row, "TrdgEndDt", "TradingEndDate")
+        "data_fim_negociacao": parse_b3_date(
+            pick(row, "TradgEndDt", "TrdgEndDt", "TradingEndDate")
         ),
-        "data_expiracao": parse_date(pick(row, "XprtnDt", "ExpirationDate")),
+        "data_expiracao": parse_b3_date(
+            pick(row, "XprtnDt", "ExpirationDate")
+        ),
         "status_arquivo": status,
         "raw_json": row,
     }
 
 
-def text_of(inst):
-    fields = (
-        "categoria_b3",
-        "descricao_b3",
-        "descricao_ativo",
-        "segmento_b3",
-        "mercado_b3",
-        "nome_corporativo",
-        "cfi_code",
-    )
-    return " | ".join(norm(inst.get(key)) for key in fields if inst.get(key))
-
-
 def derivative(inst):
-    text = text_of(inst)
-    return any(
-        term in text
-        for term in (
-            "OPTION",
-            "OPCAO",
-            "FUTURE",
-            "FUTURO",
-            "FORWARD",
-            "TERMO",
-            "SWAP",
-            "SECURITY LENDING",
-            "EMPRESTIMO",
-            "EXERCISE",
-            "EXERCICIO",
-        )
-    )
+    segment = norm(inst.get("segmento_b3"))
+    market = norm(inst.get("mercado_b3"))
+    category = norm(inst.get("categoria_b3"))
+    if segment in DERIVATIVE_SEGMENTS or market in DERIVATIVE_MARKETS:
+        return True
+    return any(term in category for term in DERIVATIVE_CATEGORY_TERMS)
 
 
-def operational(inst):
-    text = text_of(inst)
-    return any(
-        term in text
-        for term in (
-            "ODD LOT",
-            "FRACIONARIO",
-            "FRACTIONAL",
-            "BLOCK LOT",
-            "LOTE EM BLOCO",
-            "AUCTION",
-            "LEILAO",
-            "SUBSCRIPTION RIGHT",
-            "DIREITO DE SUBSCRICAO",
-            "SUBSCRIPTION RECEIPT",
-            "RECIBO DE SUBSCRICAO",
-        )
-    )
+def activity_validation_issue(inst, ref):
+    start = inst.get("data_inicio_negociacao")
+    end = inst.get("data_fim_negociacao")
+    expiration = inst.get("data_expiracao")
 
-
-def classify(inst):
-    text = text_of(inst)
-    if "BDR" in text or "BRAZILIAN DEPOSITARY" in text:
-        return "BDR", ("ETF_BDR" if "ETF" in text else None)
-    if any(
-        term in text
-        for term in (
-            "FUNDO IMOBILI",
-            "REAL ESTATE FUND",
-            " FII ",
-            "FII|",
-            "|FII",
-        )
-    ):
-        return "FII", None
-    if "ETF" in text or "EXCHANGE TRADED FUND" in text:
-        return "ETF", None
-    if "ETP" in text or "EXCHANGE TRADED PRODUCT" in text:
-        return "ETP", None
-    if any(
-        term in text
-        for term in (
-            "ORDINARY SHARES",
-            "PREFERRED SHARES",
-            "COMMON SHARES",
-            "ACAO ORDINARIA",
-            "ACAO PREFERENCIAL",
-            "ACOES ORDINARIAS",
-            "ACOES PREFERENCIAIS",
-            "STOCK",
-            "SHARES",
-        )
-    ):
-        if "UNIT" in text:
-            return "ACAO", "UNIT"
-        if "PREFERRED" in text or "PREFERENCIAL" in text:
-            return "ACAO", "PN"
-        if "ORDINARY" in text or "ORDINARIA" in text:
-            return "ACAO", "ON"
-        return "ACAO", None
-    if any(
-        term in text
-        for term in ("FIXED INCOME", "RENDA FIXA", "DEBENTURE", "BOND")
-    ):
-        return "RENDA_FIXA", None
-    if "FUND" in text or "FUNDO" in text:
-        return "FUNDO", None
-    return "OUTRO", None
+    if (end and end < ref) or (expiration and expiration < ref):
+        return "INATIVO_B3"
+    if start is None:
+        return "DATA_INICIO_NAO_INFORMADA_B3"
+    if start > ref:
+        return "INICIO_NEGOCIACAO_FUTURO"
+    return None
 
 
 def current(inst, ref):
-    end = inst.get("data_fim_negociacao")
-    expiration = inst.get("data_expiracao")
-    return not (
-        (end and end < ref) or (expiration and expiration < ref)
-    )
+    return activity_validation_issue(inst, ref) is None
 
 
-def candidate(inst, ref):
+def valid_isin(inst):
     isin = inst.get("isin")
+    return bool(isin and ISIN_RE.fullmatch(isin))
+
+
+def fixed_income_etf_pair_key(inst):
+    isin = upper(inst.get("isin"))
+    asset = norm(inst.get("ativo_base"))
+    if not isin or not asset:
+        return None
+    return isin, asset
+
+
+def official_fixed_income_etf_keys(instruments):
+    return {
+        key
+        for inst in instruments
+        if (
+            norm(inst.get("segmento_b3"))
+            == FIXED_INCOME_ETF_PRIMARY_SEGMENT
+            and norm(inst.get("mercado_b3")) == FIXED_INCOME_ETF_MARKET
+            and norm(inst.get("categoria_b3")).startswith(
+                FIXED_INCOME_ETF_PRIMARY_CATEGORY_PREFIX
+            )
+            and (key := fixed_income_etf_pair_key(inst)) is not None
+        )
+    }
+
+
+def is_fixed_income_etf_candidate(inst):
     return bool(
-        inst.get("ticker")
-        and isin
-        and ISIN_RE.fullmatch(isin)
-        and current(inst, ref)
-        and not derivative(inst)
-        and not operational(inst)
+        norm(inst.get("segmento_b3")) == FIXED_INCOME_ETF_SEGMENT
+        and norm(inst.get("mercado_b3")) == FIXED_INCOME_ETF_MARKET
+        and norm(inst.get("categoria_b3")) == FIXED_INCOME_ETF_CATEGORY
     )
+
+
+def is_official_fixed_income_etf(inst, fixed_income_etf_keys):
+    return bool(
+        is_fixed_income_etf_candidate(inst)
+        and fixed_income_etf_pair_key(inst) in fixed_income_etf_keys
+    )
+
+
+def preliminary_classification(inst):
+    category = norm(inst.get("categoria_b3"))
+    official_name = norm(inst.get("nome_corporativo"))
+
+    if inst.get("etf_renda_fixa"):
+        return "ETF", "RENDA_FIXA"
+    if category == "SHARES":
+        return "ACAO", None
+    if category == "UNIT":
+        return "ACAO", "UNIT"
+    if category == "BDR":
+        if re.search(r"\bETP\b", official_name):
+            return "BDR", "ETP"
+        if re.search(r"\bETF\b", official_name):
+            return "BDR", "ETF"
+        return "BDR", None
+    if category.startswith("ETF"):
+        return "ETF", "RENDA_VARIAVEL"
+    if category == "FUNDS":
+        return "FUNDO", None
+    if category in {"ETP", "EXCHANGE TRADED PRODUCT"}:
+        return "ETP", None
+    return "OUTRO", None
+
+
+def canonical_decision(inst, _ref, fixed_income_etf_keys=frozenset()):
+    segment = norm(inst.get("segmento_b3"))
+    market = norm(inst.get("mercado_b3"))
+    category = norm(inst.get("categoria_b3"))
+
+    if segment in NON_CANONICAL_SEGMENTS:
+        return False, NON_CANONICAL_SEGMENTS[segment]
+
+    if is_fixed_income_etf_candidate(inst):
+        if not is_official_fixed_income_etf(inst, fixed_income_etf_keys):
+            return False, "ETF_RENDA_FIXA_SEM_VINCULO_OFICIAL"
+        if not inst.get("ticker"):
+            return False, "SEM_TICKER"
+        if not valid_isin(inst):
+            return False, "SEM_ISIN"
+        return True, None
+
+    if derivative(inst):
+        return False, "DERIVATIVO"
+
+    canonical_market = (
+        segment == CANONICAL_SEGMENT and market == CANONICAL_MARKET
+    )
+
+    if not canonical_market:
+        if segment != CANONICAL_SEGMENT:
+            return False, "SEGMENTO_NAO_CANONICO"
+        return False, "MERCADO_NAO_CANONICO"
+    if category in NON_CANONICAL_CATEGORIES:
+        return False, NON_CANONICAL_CATEGORIES[category]
+    if not inst.get("ticker"):
+        return False, "SEM_TICKER"
+    if not valid_isin(inst):
+        return False, "SEM_ISIN"
+    return True, None
+
+
+def annotate_universe(instruments, ref):
+    canonical_tickers_by_isin = defaultdict(set)
+    fixed_income_etf_keys = official_fixed_income_etf_keys(instruments)
+
+    for inst in instruments:
+        inst["etf_renda_fixa"] = is_official_fixed_income_etf(
+            inst, fixed_income_etf_keys
+        )
+        is_canonical, variant = canonical_decision(
+            inst, ref, fixed_income_etf_keys
+        )
+        classe, subclasse = preliminary_classification(inst)
+        inst["instrumento_canonico"] = is_canonical
+        inst["tipo_variante_b3"] = variant
+        inst["classe_preliminar"] = classe
+        inst["subclasse_preliminar"] = subclasse
+        validation_issue = activity_validation_issue(inst, ref)
+        inst["corrente"] = validation_issue is None
+        inst["motivo_validacao_b3"] = (
+            validation_issue if is_canonical else None
+        )
+        inst["isin_valido"] = valid_isin(inst)
+        if is_canonical:
+            canonical_tickers_by_isin[inst["isin"]].add(inst["ticker"])
+
+    for inst in instruments:
+        if inst["instrumento_canonico"]:
+            inst["ticker_canonico"] = inst["ticker"]
+        else:
+            related = canonical_tickers_by_isin.get(inst.get("isin"), set())
+            inst["ticker_canonico"] = (
+                next(iter(related)) if len(related) == 1 else None
+            )
+
+        inst["em_escopo_mestre"] = bool(
+            inst["isin_valido"]
+            and (
+                inst["instrumento_canonico"]
+                or inst["tipo_variante_b3"]
+                in MASTER_NON_CANONICAL_VARIANTS
+            )
+        )
+
+    return instruments
 
 
 def snapshot_row(inst):
     return (
         inst["data_referencia"],
         inst["ticker"],
-        inst["isin"],
+        inst.get("isin"),
         inst.get("ativo_base"),
         inst.get("descricao_ativo"),
         inst.get("segmento_b3"),
@@ -370,6 +515,15 @@ def snapshot_row(inst):
         inst.get("data_expiracao"),
         inst.get("status_arquivo"),
         json.dumps(inst.get("raw_json") or {}, ensure_ascii=False),
+        inst["instrumento_canonico"],
+        inst.get("tipo_variante_b3"),
+        inst.get("ticker_canonico"),
+        inst["classe_preliminar"],
+        inst.get("subclasse_preliminar"),
+        inst["corrente"],
+        inst.get("motivo_validacao_b3"),
+        inst["isin_valido"],
+        inst["em_escopo_mestre"],
     )
 
 
@@ -381,14 +535,14 @@ def copy_rows(cur, table, columns, rows):
 
 
 def save_snapshot(conn, instruments, ref):
-    progress(f"carregando snapshot em lote: linhas={len(instruments)}")
+    progress(f"carregando snapshot bruto em lote: linhas={len(instruments)}")
     with conn.cursor() as cur:
         cur.execute(
             """
             create temporary table tmp_b3_snapshot (
                 data_referencia date not null,
                 ticker text not null,
-                isin text not null,
+                isin text,
                 ativo_base text,
                 descricao_ativo text,
                 segmento_b3 text,
@@ -403,7 +557,16 @@ def save_snapshot(conn, instruments, ref):
                 data_fim_negociacao date,
                 data_expiracao date,
                 status_arquivo text,
-                raw_json jsonb
+                raw_json jsonb,
+                instrumento_canonico boolean not null,
+                tipo_variante_b3 text,
+                ticker_canonico text,
+                classe_preliminar text not null,
+                subclasse_preliminar text,
+                corrente boolean not null,
+                motivo_validacao_b3 text,
+                isin_valido boolean not null,
+                em_escopo_mestre boolean not null
             ) on commit drop
             """
         )
@@ -411,9 +574,18 @@ def save_snapshot(conn, instruments, ref):
             copy_rows(
                 cur,
                 "tmp_b3_snapshot",
-                SNAPSHOT_COLUMNS,
+                SNAPSHOT_COPY_COLUMNS,
                 (snapshot_row(inst) for inst in instruments),
             )
+
+        cur.execute(
+            "create index on tmp_b3_snapshot (ticker, isin)"
+        )
+        cur.execute(
+            "create index on tmp_b3_snapshot (instrumento_canonico, corrente)"
+        )
+        cur.execute("analyze tmp_b3_snapshot")
+
         cur.execute(
             """
             delete from investimento.b3_instrumentos_snapshot
@@ -428,130 +600,307 @@ def save_snapshot(conn, instruments, ref):
                 segmento_b3, mercado_b3, categoria_b3, descricao_b3,
                 cfi_code, moeda, nome_corporativo, nivel_governanca,
                 data_inicio_negociacao, data_fim_negociacao, data_expiracao,
-                status_arquivo, raw_json
+                status_arquivo, raw_json, instrumento_canonico,
+                tipo_variante_b3, ticker_canonico
             )
             select
                 data_referencia, ticker, isin, ativo_base, descricao_ativo,
                 segmento_b3, mercado_b3, categoria_b3, descricao_b3,
                 cfi_code, moeda, nome_corporativo, nivel_governanca,
                 data_inicio_negociacao, data_fim_negociacao, data_expiracao,
-                status_arquivo, raw_json
+                status_arquivo, raw_json, instrumento_canonico,
+                tipo_variante_b3, ticker_canonico
             from tmp_b3_snapshot
             """
         )
         inserted = cur.rowcount
-    progress(f"snapshot persistido em operação set-based: linhas={inserted}")
+
+        cur.execute(
+            """
+            create temporary table tmp_b3_decisions as
+            select distinct on (ticker)
+                ticker,
+                isin,
+                coalesce(
+                    nome_corporativo,
+                    descricao_ativo,
+                    descricao_b3,
+                    ticker
+                ) as nome,
+                ativo_base as nome_pregao,
+                classe_preliminar,
+                subclasse_preliminar,
+                categoria_b3,
+                segmento_b3,
+                mercado_b3,
+                moeda,
+                instrumento_canonico,
+                tipo_variante_b3,
+                ticker_canonico,
+                corrente,
+                motivo_validacao_b3,
+                isin_valido,
+                em_escopo_mestre
+            from tmp_b3_snapshot
+            order by
+                ticker,
+                instrumento_canonico desc,
+                corrente desc,
+                em_escopo_mestre desc,
+                isin nulls last
+            """
+        )
+        cur.execute(
+            "create unique index on tmp_b3_decisions (ticker)"
+        )
+        cur.execute("create index on tmp_b3_decisions (isin)")
+        cur.execute("analyze tmp_b3_decisions")
+
+    progress(f"snapshot bruto persistido: linhas={inserted}")
     return inserted
 
 
-def load_existing(conn):
-    with conn.cursor() as cur:
-        cur.execute("select ticker, isin from investimento.ativos")
-        return {upper(row[0]): upper(row[1]) for row in cur.fetchall()}
+def build_audit(instruments):
+    canonical_classes = Counter()
+    confirmed_canonical_classes = Counter()
+    pending_start_classes = Counter()
+    canonical_etfs = Counter()
+    non_canonical_reasons = Counter()
+    examples = defaultdict(list)
+    requested = {ticker: None for ticker in AUDIT_TICKERS}
 
-
-def best(rows, target_isin=None):
-    if target_isin:
-        exact = [row for row in rows if upper(row.get("isin")) == target_isin]
-        if exact:
-            rows = exact
-
-    def score(inst):
-        text = text_of(inst)
-        return (
-            (10 if not derivative(inst) and not operational(inst) else 0)
-            + (5 if any(term in text for term in ("SPOT", "CASH", "VISTA")) else 0)
-            + (1 if inst.get("categoria_b3") else 0)
-        )
-
-    return max(rows, key=score) if rows else None
-
-
-def candidate_row(inst):
-    classe, subclasse = classify(inst)
-    ticker = inst["ticker"]
-    nome = (
-        inst.get("nome_corporativo")
-        or inst.get("descricao_ativo")
-        or inst.get("descricao_b3")
-        or ticker
-    )
-    return (
-        ticker,
-        upper(inst["isin"]),
-        nome,
-        inst.get("ativo_base"),
-        classe,
-        subclasse,
-        inst.get("descricao_b3"),
-        inst.get("categoria_b3"),
-        inst.get("segmento_b3"),
-        inst.get("mercado_b3"),
-        inst.get("moeda") or "BRL",
-    )
-
-
-def stage_candidates(conn, instruments, ref):
-    existing = load_existing(conn)
-    by_ticker = {}
     for inst in instruments:
-        by_ticker.setdefault(inst["ticker"], []).append(inst)
+        if inst["instrumento_canonico"]:
+            canonical_classes[inst["classe_preliminar"]] += 1
+            if inst["corrente"]:
+                confirmed_canonical_classes[inst["classe_preliminar"]] += 1
+            elif (
+                inst.get("motivo_validacao_b3")
+                == "DATA_INICIO_NAO_INFORMADA_B3"
+            ):
+                pending_start_classes[inst["classe_preliminar"]] += 1
+            if inst["classe_preliminar"] == "ETF":
+                tipo_etf = (
+                    "RENDA_FIXA"
+                    if inst.get("etf_renda_fixa")
+                    else "RENDA_VARIAVEL"
+                )
+                canonical_etfs[tipo_etf] += 1
+        else:
+            reason = inst.get("tipo_variante_b3") or "NAO_INFORMADO"
+            non_canonical_reasons[reason] += 1
+            if len(examples[reason]) < 5:
+                examples[reason].append(
+                    {
+                        "ticker": inst["ticker"],
+                        "segmento_b3": inst.get("segmento_b3"),
+                        "mercado_b3": inst.get("mercado_b3"),
+                        "categoria_b3": inst.get("categoria_b3"),
+                        "ticker_canonico": inst.get("ticker_canonico"),
+                    }
+                )
 
-    candidates = []
-    for ticker, rows in by_ticker.items():
-        valid = [row for row in rows if candidate(row, ref)]
-        selected = best(valid, existing.get(ticker))
-        if selected:
-            candidates.append(candidate_row(selected))
+        ticker = inst["ticker"]
+        if ticker in requested and requested[ticker] is None:
+            requested[ticker] = {
+                "encontrado": True,
+                "instrumento_canonico": inst["instrumento_canonico"],
+                "tipo_variante_b3": inst.get("tipo_variante_b3"),
+                "atividade_b3_confirmada": inst["corrente"],
+                "motivo_validacao_b3": inst.get("motivo_validacao_b3"),
+                "status_validacao_proposto": (
+                    "VALIDADO_B3"
+                    if inst["instrumento_canonico"] and inst["corrente"]
+                    else (
+                        "DUVIDOSO"
+                        if inst["instrumento_canonico"]
+                        else "NAO_CANONICO"
+                    )
+                ),
+                "ticker_canonico": inst.get("ticker_canonico"),
+                "classe_preliminar": inst["classe_preliminar"],
+                "subclasse_preliminar": inst.get("subclasse_preliminar"),
+                "tipo_etf_preliminar": (
+                    "RENDA_FIXA"
+                    if inst.get("etf_renda_fixa")
+                    else (
+                        "RENDA_VARIAVEL"
+                        if inst["classe_preliminar"] == "ETF"
+                        else None
+                    )
+                ),
+                "segmento_b3": inst.get("segmento_b3"),
+                "mercado_b3": inst.get("mercado_b3"),
+                "categoria_b3": inst.get("categoria_b3"),
+                "isin": inst.get("isin"),
+            }
 
-    progress(f"preparando candidatos válidos: tickers={len(candidates)}")
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            create temporary table tmp_b3_candidates (
-                ticker text primary key,
-                isin text not null,
-                nome text,
-                nome_pregao text,
-                classe text not null,
-                subclasse text,
-                tipo_instrumento text,
-                categoria_b3 text,
-                segmento_b3 text,
-                mercado_b3 text,
-                moeda text not null
-            ) on commit drop
-            """
+    for ticker, result in requested.items():
+        if result is None:
+            requested[ticker] = {"encontrado": False}
+
+    total_canonical = sum(canonical_classes.values())
+    total_confirmed = sum(confirmed_canonical_classes.values())
+    total_pending_start = sum(pending_start_classes.values())
+    return {
+        "total_bruto_snapshot": len(instruments),
+        "total_canonico": total_canonical,
+        "total_nao_canonico": len(instruments) - total_canonical,
+        "distribuicao_canonica_classe": dict(
+            sorted(canonical_classes.items())
+        ),
+        "total_canonicos_confirmados_b3": total_confirmed,
+        "distribuicao_canonicos_confirmados_classe": dict(
+            sorted(confirmed_canonical_classes.items())
+        ),
+        "total_canonicos_pendentes_data_inicio": total_pending_start,
+        "distribuicao_pendentes_data_inicio_classe": dict(
+            sorted(pending_start_classes.items())
+        ),
+        "total_canonicos_outras_pendencias": (
+            total_canonical - total_confirmed - total_pending_start
+        ),
+        "etfs_canonicos_renda_variavel": canonical_etfs["RENDA_VARIAVEL"],
+        "etfs_canonicos_renda_fixa": canonical_etfs["RENDA_FIXA"],
+        "etfs_canonicos_total": sum(canonical_etfs.values()),
+        "distribuicao_nao_canonicos_motivo": dict(
+            non_canonical_reasons.most_common()
+        ),
+        "exemplos_nao_canonicos": dict(examples),
+        "validacao_tickers": requested,
+    }
+
+
+def emit_audit(audit):
+    progress(
+        "AUDITORIA | "
+        f"total_bruto={audit['total_bruto_snapshot']} "
+        f"total_canonico={audit['total_canonico']} "
+        f"total_nao_canonico={audit['total_nao_canonico']}"
+    )
+    progress(
+        "AUDITORIA | classes_canonicas="
+        + json.dumps(
+            audit["distribuicao_canonica_classe"],
+            ensure_ascii=False,
+            sort_keys=True,
         )
-        if candidates:
-            copy_rows(cur, "tmp_b3_candidates", CANDIDATE_COLUMNS, candidates)
-    return len(candidates)
+    )
+    progress(
+        "AUDITORIA | canonicidade_e_atividade "
+        f"confirmados_b3={audit['total_canonicos_confirmados_b3']} "
+        f"pendentes_data_inicio="
+        f"{audit['total_canonicos_pendentes_data_inicio']} "
+        f"nao_canonicos_estruturais={audit['total_nao_canonico']}"
+    )
+    progress(
+        "AUDITORIA | pendentes_data_inicio_por_classe="
+        + json.dumps(
+            audit["distribuicao_pendentes_data_inicio_classe"],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+    progress(
+        "AUDITORIA | ETFs canônicos "
+        f"renda_variavel={audit['etfs_canonicos_renda_variavel']} "
+        f"renda_fixa={audit['etfs_canonicos_renda_fixa']} "
+        f"total={audit['etfs_canonicos_total']}"
+    )
+
+    for reason, total in audit["distribuicao_nao_canonicos_motivo"].items():
+        example_tickers = [
+            item["ticker"]
+            for item in audit["exemplos_nao_canonicos"].get(reason, [])
+        ]
+        progress(
+            "AUDITORIA | "
+            f"nao_canonico motivo={reason} total={total} "
+            f"exemplos={','.join(example_tickers)}"
+        )
+
+    for ticker in AUDIT_TICKERS:
+        progress(
+            f"AUDITORIA | ticker={ticker} "
+            + json.dumps(
+                audit["validacao_tickers"][ticker],
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
 
 
 COUNTS_SQL = """
 select
-    (select count(*) from tmp_b3_candidates) as candidatos,
     (
         select count(*)
-        from tmp_b3_candidates c
-        left join investimento.ativos a
-          on upper(trim(a.ticker)) = c.ticker
-        where a.ticker is null
-    ) as novos,
+        from tmp_b3_decisions d
+        where d.instrumento_canonico
+          and d.isin_valido
+    ) as candidatos_canonicos,
     (
         select count(*)
-        from tmp_b3_candidates c
+        from tmp_b3_decisions d
+        where d.instrumento_canonico
+          and d.corrente
+          and d.isin_valido
+    ) as canonicos_confirmados_b3,
+    (
+        select count(*)
+        from tmp_b3_decisions d
+        where d.instrumento_canonico
+          and d.motivo_validacao_b3 = 'DATA_INICIO_NAO_INFORMADA_B3'
+          and d.isin_valido
+    ) as canonicos_pendentes_data_inicio,
+    (
+        select count(*)
+        from tmp_b3_decisions d
+        where not d.instrumento_canonico
+    ) as nao_canonicos_estruturais,
+    (
+        select count(*)
+        from tmp_b3_decisions d
+        where d.em_escopo_mestre
+          and d.instrumento_canonico
+          and not exists (
+              select 1
+              from investimento.ativos a
+              where upper(trim(a.ticker)) = d.ticker
+          )
+    ) as novos_canonicos,
+    (
+        select count(*)
+        from tmp_b3_decisions d
+        where d.em_escopo_mestre
+          and not d.instrumento_canonico
+          and not exists (
+              select 1
+              from investimento.ativos a
+              where upper(trim(a.ticker)) = d.ticker
+          )
+    ) as novos_nao_canonicos,
+    (
+        select count(*)
+        from tmp_b3_decisions d
         left join investimento.ativos a
-          on upper(trim(a.ticker)) = c.ticker
-        where a.ticker is null or upper(trim(a.isin)) = c.isin
-    ) as validados,
+          on upper(trim(a.ticker)) = d.ticker
+        where d.instrumento_canonico
+          and d.corrente
+          and d.isin_valido
+          and (
+              a.ticker is null
+              or upper(trim(a.isin)) = d.isin
+          )
+    ) as validados_b3,
     (
         select count(*)
         from investimento.ativos a
-        join tmp_b3_candidates c
-          on c.ticker = upper(trim(a.ticker))
-        where a.isin is not null
-          and upper(trim(a.isin)) <> c.isin
+        join tmp_b3_decisions d
+          on d.ticker = upper(trim(a.ticker))
+        where d.isin_valido
+          and a.isin is not null
+          and trim(a.isin) <> ''
+          and upper(trim(a.isin)) <> d.isin
     ) as divergentes,
     (
         select count(*)
@@ -564,176 +913,281 @@ select
         where a.isin is not null
           and trim(a.isin) <> ''
           and not exists (
-              select 1 from tmp_b3_candidates c
-              where c.ticker = upper(trim(a.ticker))
-          )
-          and exists (
-              select 1 from tmp_b3_snapshot s
-              where s.ticker = upper(trim(a.ticker))
-                and s.isin = upper(trim(a.isin))
-                and (s.data_fim_negociacao is null or s.data_fim_negociacao >= %s)
-                and (s.data_expiracao is null or s.data_expiracao >= %s)
-          )
-    ) as duvidosos,
-    (
-        select count(*)
-        from investimento.ativos a
-        where a.isin is not null
-          and trim(a.isin) <> ''
-          and not exists (
-              select 1 from tmp_b3_candidates c
-              where c.ticker = upper(trim(a.ticker))
-          )
-          and not exists (
-              select 1 from tmp_b3_snapshot s
-              where s.ticker = upper(trim(a.ticker))
-                and s.isin = upper(trim(a.isin))
-                and (s.data_fim_negociacao is null or s.data_fim_negociacao >= %s)
-                and (s.data_expiracao is null or s.data_expiracao >= %s)
+              select 1
+              from tmp_b3_decisions d
+              where d.ticker = upper(trim(a.ticker))
           )
     ) as inativos
 """
 
 
-APPLY_MASTER_SQL = """
+UPDATE_CANONICAL_SQL = """
 update investimento.ativos a
-   set nome = coalesce(c.nome, a.nome),
-       classe = c.classe,
-       subclasse = c.subclasse,
-       tipo_instrumento = c.tipo_instrumento,
-       categoria_b3 = c.categoria_b3,
-       segmento_b3 = c.segmento_b3,
-       mercado_b3 = c.mercado_b3,
-       moeda = coalesce(c.moeda, a.moeda),
-       isin = c.isin,
-       ativo = true,
+   set nome = coalesce(d.nome, a.nome),
+       nome_pregao = coalesce(d.nome_pregao, a.nome_pregao),
+       classe = case
+           when a.status_validacao = 'VALIDADO_OFICIAL' then a.classe
+           else d.classe_preliminar
+       end,
+       subclasse = case
+           when a.status_validacao = 'VALIDADO_OFICIAL' then a.subclasse
+           else d.subclasse_preliminar
+       end,
+       tipo_instrumento = d.categoria_b3,
+       categoria_b3 = d.categoria_b3,
+       segmento_b3 = d.segmento_b3,
+       mercado_b3 = d.mercado_b3,
+       moeda = coalesce(d.moeda, a.moeda),
+       isin = d.isin,
+       ativo = case
+           when a.status_validacao = 'VALIDADO_OFICIAL' then a.ativo
+           else d.corrente
+       end,
+       instrumento_canonico = true,
+       tipo_variante_b3 = null,
+       ticker_canonico = d.ticker,
+       elegivel_analise = case
+           when a.status_validacao = 'VALIDADO_OFICIAL'
+               then a.elegivel_analise
+           else false
+       end,
+       status_validacao = case
+           when a.status_validacao = 'VALIDADO_OFICIAL'
+               then 'VALIDADO_OFICIAL'
+           when d.corrente then 'VALIDADO_B3'
+           when d.motivo_validacao_b3 = 'INATIVO_B3' then 'INATIVO'
+           else 'DUVIDOSO'
+       end,
+       motivo_exclusao = case
+           when a.status_validacao = 'VALIDADO_OFICIAL'
+               then a.motivo_exclusao
+           when d.corrente
+               then 'Canônico na B3; aguarda validações oficiais complementares obrigatórias da classe.'
+           else concat(
+               d.motivo_validacao_b3,
+               '; instrumento estruturalmente canônico; atividade aguarda confirmação oficial complementar (COTAHIST/B3, CVM ou fonte oficial da classe).'
+           )
+       end,
+       fonte_validacao = case
+           when a.status_validacao = 'VALIDADO_OFICIAL'
+               then a.fonte_validacao
+           else %(source_code)s
+       end,
+       validado_em = case
+           when a.status_validacao = 'VALIDADO_OFICIAL'
+               then a.validado_em
+           else now()
+       end,
+       atualizado_em = now()
+  from tmp_b3_decisions d
+ where d.ticker = upper(trim(a.ticker))
+   and d.instrumento_canonico
+   and d.isin_valido
+   and a.isin is not null
+   and upper(trim(a.isin)) = d.isin
+"""
+
+
+UPDATE_NON_CANONICAL_SQL = """
+update investimento.ativos a
+   set nome = coalesce(d.nome, a.nome),
+       nome_pregao = coalesce(d.nome_pregao, a.nome_pregao),
+       classe = d.classe_preliminar,
+       subclasse = d.subclasse_preliminar,
+       tipo_instrumento = d.categoria_b3,
+       categoria_b3 = d.categoria_b3,
+       segmento_b3 = d.segmento_b3,
+       mercado_b3 = d.mercado_b3,
+       moeda = coalesce(d.moeda, a.moeda),
+       ativo = false,
+       instrumento_canonico = false,
+       tipo_variante_b3 = d.tipo_variante_b3,
+       ticker_canonico = d.ticker_canonico,
        elegivel_analise = false,
-       status_validacao = 'VALIDADO_B3',
-       motivo_exclusao = 'Validado na B3; aguarda validação oficial complementar obrigatória da classe.',
+       status_validacao = 'NAO_CANONICO',
+       motivo_exclusao = concat(
+           'Instrumento B3 não canônico: ',
+           d.tipo_variante_b3,
+           '.'
+       ),
        fonte_validacao = %(source_code)s,
        validado_em = now(),
        atualizado_em = now()
-  from tmp_b3_candidates c
- where c.ticker = upper(trim(a.ticker))
+  from tmp_b3_decisions d
+ where d.ticker = upper(trim(a.ticker))
+   and not d.instrumento_canonico
+   and d.tipo_variante_b3 in (
+       'EQUITY_BLOCK_TRADING_LOT',
+       'ETF_PRIMARY_MARKET',
+       'ODD_LOT',
+       'RIGHTS',
+       'RECEIPTS',
+       'WARRANT',
+       'INDEX'
+   )
+   and d.isin_valido
    and a.isin is not null
-   and upper(trim(a.isin)) = c.isin;
+   and upper(trim(a.isin)) = d.isin
+"""
 
+
+UPDATE_DIVERGENT_SQL = """
 update investimento.ativos a
    set ativo = false,
+       instrumento_canonico = d.instrumento_canonico,
+       tipo_variante_b3 = d.tipo_variante_b3,
+       ticker_canonico = d.ticker_canonico,
        elegivel_analise = false,
        status_validacao = 'DIVERGENTE',
        motivo_exclusao = 'Ticker encontrado na B3 com ISIN diferente do cadastro mestre.',
+       categoria_b3 = d.categoria_b3,
+       segmento_b3 = d.segmento_b3,
+       mercado_b3 = d.mercado_b3,
        fonte_validacao = %(source_code)s,
        validado_em = now(),
        atualizado_em = now()
-  from tmp_b3_candidates c
- where c.ticker = upper(trim(a.ticker))
+ from tmp_b3_decisions d
+ where d.ticker = upper(trim(a.ticker))
+   and d.isin_valido
    and a.isin is not null
-   and upper(trim(a.isin)) <> c.isin;
+   and trim(a.isin) <> ''
+   and upper(trim(a.isin)) <> d.isin
+"""
 
+
+UPDATE_INVALID_OFFICIAL_ID_SQL = """
 update investimento.ativos a
    set ativo = false,
-       elegivel_analise = false,
-       status_validacao = 'SEM_ISIN',
-       motivo_exclusao = 'Ativo sem ISIN válido.',
-       fonte_validacao = %(source_code)s,
-       validado_em = now(),
-       atualizado_em = now()
- where a.isin is null or trim(a.isin) = '';
-
-update investimento.ativos a
-   set ativo = false,
+       instrumento_canonico = false,
+       tipo_variante_b3 = null,
+       ticker_canonico = null,
        elegivel_analise = false,
        status_validacao = 'DUVIDOSO',
-       motivo_exclusao = 'Instrumento oficial B3 fora do universo de carteira suportado nesta fase.',
+       motivo_exclusao = 'Ticker encontrado na B3 sem ISIN oficial válido.',
        fonte_validacao = %(source_code)s,
        validado_em = now(),
        atualizado_em = now()
- where a.isin is not null
-   and trim(a.isin) <> ''
-   and not exists (
-       select 1 from tmp_b3_candidates c
-       where c.ticker = upper(trim(a.ticker))
-   )
-   and exists (
-       select 1 from tmp_b3_snapshot s
-       where s.ticker = upper(trim(a.ticker))
-         and s.isin = upper(trim(a.isin))
-         and (s.data_fim_negociacao is null or s.data_fim_negociacao >= %(ref)s)
-         and (s.data_expiracao is null or s.data_expiracao >= %(ref)s)
-   );
+ from tmp_b3_decisions d
+ where d.ticker = upper(trim(a.ticker))
+   and not d.isin_valido
+"""
 
+
+UPDATE_WITHOUT_ISIN_SQL = """
+update investimento.ativos
+   set ativo = false,
+       instrumento_canonico = false,
+       tipo_variante_b3 = null,
+       ticker_canonico = null,
+       elegivel_analise = false,
+       status_validacao = 'SEM_ISIN',
+       motivo_exclusao = 'Ativo sem ISIN válido no cadastro mestre.',
+       fonte_validacao = %(source_code)s,
+       validado_em = now(),
+       atualizado_em = now()
+ where isin is null or trim(isin) = ''
+"""
+
+
+UPDATE_INACTIVE_SQL = """
 update investimento.ativos a
    set ativo = false,
        elegivel_analise = false,
        status_validacao = 'INATIVO',
-       motivo_exclusao = 'Ticker/ISIN não encontrado como instrumento corrente no último cadastro oficial da B3.',
+       motivo_exclusao = 'Ticker não encontrado como instrumento corrente no último cadastro oficial da B3.',
        fonte_validacao = %(source_code)s,
        validado_em = now(),
        atualizado_em = now()
  where a.isin is not null
    and trim(a.isin) <> ''
    and not exists (
-       select 1 from tmp_b3_candidates c
-       where c.ticker = upper(trim(a.ticker))
+       select 1
+       from tmp_b3_decisions d
+       where d.ticker = upper(trim(a.ticker))
    )
-   and not exists (
-       select 1 from tmp_b3_snapshot s
-       where s.ticker = upper(trim(a.ticker))
-         and s.isin = upper(trim(a.isin))
-         and (s.data_fim_negociacao is null or s.data_fim_negociacao >= %(ref)s)
-         and (s.data_expiracao is null or s.data_expiracao >= %(ref)s)
-   );
+"""
 
+
+INSERT_NEW_SQL = """
 insert into investimento.ativos (
     ticker, nome, nome_pregao, classe, subclasse, tipo_instrumento,
     moeda, ativo, isin, fonte_cadastro, url_fonte, categoria_b3,
-    segmento_b3, mercado_b3, status_validacao, elegivel_analise,
+    segmento_b3, mercado_b3, instrumento_canonico, tipo_variante_b3,
+    ticker_canonico, status_validacao, elegivel_analise,
     motivo_exclusao, fonte_validacao, validado_em, atualizado_em
 )
 select
-    c.ticker, c.nome, c.nome_pregao, c.classe, c.subclasse,
-    c.tipo_instrumento, c.moeda, true, c.isin, %(source_code)s,
-    %(source_url)s, c.categoria_b3, c.segmento_b3, c.mercado_b3,
-    'VALIDADO_B3', false,
-    'Validado na B3; aguarda validação oficial complementar obrigatória da classe.',
-    %(source_code)s, now(), now()
-from tmp_b3_candidates c
-where not exists (
-    select 1 from investimento.ativos a
-    where upper(trim(a.ticker)) = c.ticker
-)
-on conflict (ticker) do nothing;
+    d.ticker,
+    d.nome,
+    d.nome_pregao,
+    d.classe_preliminar,
+    d.subclasse_preliminar,
+    d.categoria_b3,
+    coalesce(d.moeda, 'BRL'),
+    d.instrumento_canonico and d.corrente,
+    d.isin,
+    %(source_code)s,
+    %(source_url)s,
+    d.categoria_b3,
+    d.segmento_b3,
+    d.mercado_b3,
+    d.instrumento_canonico,
+    d.tipo_variante_b3,
+    d.ticker_canonico,
+    case
+        when d.instrumento_canonico and d.corrente then 'VALIDADO_B3'
+        when d.instrumento_canonico
+             and d.motivo_validacao_b3 = 'INATIVO_B3' then 'INATIVO'
+        when d.instrumento_canonico then 'DUVIDOSO'
+        else 'NAO_CANONICO'
+    end,
+    false,
+    case
+        when d.instrumento_canonico and d.corrente
+            then 'Canônico na B3; aguarda validações oficiais complementares obrigatórias da classe.'
+        when d.instrumento_canonico
+            then concat(
+                d.motivo_validacao_b3,
+                '; instrumento estruturalmente canônico; atividade aguarda confirmação oficial complementar (COTAHIST/B3, CVM ou fonte oficial da classe).'
+            )
+        else concat(
+            'Instrumento B3 não canônico: ',
+            d.tipo_variante_b3,
+            '.'
+        )
+    end,
+    %(source_code)s,
+    now(),
+    now()
+from tmp_b3_decisions d
+where d.em_escopo_mestre
+  and not exists (
+      select 1
+      from investimento.ativos a
+      where upper(trim(a.ticker)) = d.ticker
+  )
+on conflict (ticker) do nothing
 """
 
-(
-    UPDATE_VALIDATED_SQL,
-    UPDATE_DIVERGENT_SQL,
-    UPDATE_WITHOUT_ISIN_SQL,
-    UPDATE_DOUBTFUL_SQL,
-    UPDATE_INACTIVE_SQL,
-    INSERT_NEW_SQL,
-) = APPLY_MASTER_SQL.strip().split(";\n\n")
 
-
-def validate_master(conn, instruments, ref):
-    stage_candidates(conn, instruments, ref)
-    progress("calculando resultados e atualizando cadastro mestre em lote")
+def validate_master(conn):
+    progress("aplicando universo canônico ao cadastro mestre em operações set-based")
     with conn.cursor() as cur:
-        cur.execute(COUNTS_SQL, (ref, ref, ref, ref))
+        cur.execute(COUNTS_SQL)
         columns = [description.name for description in cur.description]
         counts = dict(zip(columns, cur.fetchone()))
         params = {
             "source_code": SOURCE_CODE,
             "source_url": SOURCE_URL,
-            "ref": ref,
         }
-        cur.execute(UPDATE_VALIDATED_SQL, params)
+        cur.execute(UPDATE_CANONICAL_SQL, params)
+        cur.execute(UPDATE_NON_CANONICAL_SQL, params)
         cur.execute(UPDATE_DIVERGENT_SQL, params)
+        cur.execute(UPDATE_INVALID_OFFICIAL_ID_SQL, params)
         cur.execute(UPDATE_WITHOUT_ISIN_SQL, params)
-        cur.execute(UPDATE_DOUBTFUL_SQL, params)
         cur.execute(UPDATE_INACTIVE_SQL, params)
         cur.execute(INSERT_NEW_SQL, params)
+
     progress(
         "cadastro mestre atualizado: "
         + " ".join(f"{key}={value}" for key, value in counts.items())
@@ -770,7 +1224,7 @@ def log_end(conn, log_id, status, result, message):
             """,
             (
                 status,
-                (result or {}).get("linhas_arquivo"),
+                (result or {}).get("total_bruto_snapshot"),
                 (result or {}).get("snapshot", 0),
                 message[:1500],
                 log_id,
@@ -780,34 +1234,61 @@ def log_end(conn, log_id, status, result, message):
 
 
 def main():
-    progress("iniciando validação")
+    progress("iniciando validação e construção do universo canônico")
     conn = connect()
     log_id = log_start(conn)
     try:
         ref, status, raw = download_latest()
-        progress("normalizando arquivo oficial")
+        progress("normalizando arquivo oficial completo")
         instruments = [normalize(row, ref, status) for row in raw]
-        with_isin = [
-            inst
-            for inst in instruments
-            if inst.get("isin") and ISIN_RE.fullmatch(inst["isin"])
-        ]
+        del raw
+        annotate_universe(instruments, ref)
+        audit = build_audit(instruments)
         progress(
-            f"normalização concluída: linhas={len(raw)} com_isin={len(with_isin)}"
+            "normalização concluída: "
+            f"linhas={len(instruments)} "
+            f"canonicos={audit['total_canonico']} "
+            f"nao_canonicos={audit['total_nao_canonico']}"
         )
-        snapshot_count = save_snapshot(conn, with_isin, ref)
-        counts = validate_master(conn, with_isin, ref)
+
+        snapshot_count = save_snapshot(conn, instruments, ref)
+        counts = validate_master(conn)
         conn.commit()
+
         result = {
             "data_referencia": str(ref),
             "status_arquivo": status,
-            "linhas_arquivo": len(raw),
-            "linhas_com_isin": len(with_isin),
             "snapshot": snapshot_count,
+            "total_bruto_snapshot": audit["total_bruto_snapshot"],
+            "total_canonico": audit["total_canonico"],
+            "total_nao_canonico": audit["total_nao_canonico"],
+            "distribuicao_canonica_classe": audit[
+                "distribuicao_canonica_classe"
+            ],
+            "total_canonicos_confirmados_b3": audit[
+                "total_canonicos_confirmados_b3"
+            ],
+            "total_canonicos_pendentes_data_inicio": audit[
+                "total_canonicos_pendentes_data_inicio"
+            ],
+            "distribuicao_pendentes_data_inicio_classe": audit[
+                "distribuicao_pendentes_data_inicio_classe"
+            ],
+            "etfs_canonicos_renda_variavel": audit[
+                "etfs_canonicos_renda_variavel"
+            ],
+            "etfs_canonicos_renda_fixa": audit[
+                "etfs_canonicos_renda_fixa"
+            ],
+            "etfs_canonicos_total": audit["etfs_canonicos_total"],
+            "distribuicao_nao_canonicos_motivo": audit[
+                "distribuicao_nao_canonicos_motivo"
+            ],
             **counts,
         }
         message = json.dumps(result, ensure_ascii=False, sort_keys=True)
         log_end(conn, log_id, "SUCESSO", result, message)
+        emit_audit(audit)
         progress(f"SUCESSO | {message}")
         return 0
     except Exception as exc:
