@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+
+# Dados locais
+*.csv
+*.zip
+*.parquet
+*.db
+
+# IDE / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
