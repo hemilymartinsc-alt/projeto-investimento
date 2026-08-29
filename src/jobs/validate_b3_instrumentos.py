@@ -89,15 +89,6 @@ DERIVATIVE_CATEGORY_TERMS = (
 
 B3_NULL_DATE = datetime.max.date()
 
-# Variantes listadas que devem ser registradas no mestre para que recebam
-# explicitamente o status NAO_CANONICO. Derivativos continuam apenas no snapshot.
-MASTER_NON_CANONICAL_VARIANTS = frozenset(
-    {
-        *NON_CANONICAL_SEGMENTS.values(),
-        *NON_CANONICAL_CATEGORIES.values(),
-    }
-)
-
 AUDIT_TICKERS = (
     "PETR4",
     "VALE3",
@@ -636,6 +627,14 @@ def valid_isin(inst):
     return bool(isin and ISIN_RE.fullmatch(isin))
 
 
+def new_master_candidate(inst):
+    return bool(
+        inst.get("instrumento_canonico")
+        and inst.get("atividade_confirmada_b3")
+        and inst.get("isin_valido")
+    )
+
+
 def fixed_income_etf_pair_key(inst):
     isin = upper(inst.get("isin"))
     asset = norm(inst.get("ativo_base"))
@@ -778,14 +777,9 @@ def annotate_universe(instruments, ref):
                 next(iter(related)) if len(related) == 1 else None
             )
 
-        inst["em_escopo_mestre"] = bool(
-            inst["isin_valido"]
-            and (
-                inst["instrumento_canonico"]
-                or inst["tipo_variante_b3"]
-                in MASTER_NON_CANONICAL_VARIANTS
-            )
-        )
+        # Somente instrumentos que já tiveram atividade soberana confirmada
+        # pela B3 podem nascer no cadastro mestre. O snapshot segue integral.
+        inst["em_escopo_mestre"] = new_master_candidate(inst)
 
     return instruments
 
@@ -1048,6 +1042,9 @@ def build_audit(instruments):
     total_canonical = sum(canonical_classes.values())
     total_confirmed = sum(confirmed_canonical_classes.values())
     total_pending_start = sum(pending_start_classes.values())
+    total_master_candidates = sum(
+        1 for inst in instruments if new_master_candidate(inst)
+    )
     return {
         "total_bruto_snapshot": len(instruments),
         "total_canonico": total_canonical,
@@ -1066,6 +1063,8 @@ def build_audit(instruments):
         "total_canonicos_outras_pendencias": (
             total_canonical - total_confirmed - total_pending_start
         ),
+        "total_candidatos_novos_mestre": total_master_candidates,
+        "total_somente_snapshot_b3": len(instruments) - total_master_candidates,
         "distribuicao_status_atividade_canonicos": dict(
             canonical_activity_statuses.most_common()
         ),
@@ -1101,6 +1100,12 @@ def emit_audit(audit):
         f"pendentes_data_inicio="
         f"{audit['total_canonicos_pendentes_data_inicio']} "
         f"nao_canonicos_estruturais={audit['total_nao_canonico']}"
+    )
+    progress(
+        "AUDITORIA | destino_cadastro "
+        f"candidatos_novos_mestre="
+        f"{audit['total_candidatos_novos_mestre']} "
+        f"somente_snapshot_b3={audit['total_somente_snapshot_b3']}"
     )
     progress(
         "AUDITORIA | pendentes_data_inicio_por_classe="
@@ -1177,25 +1182,15 @@ select
     (
         select count(*)
         from tmp_b3_decisions d
-        where d.em_escopo_mestre
-          and d.instrumento_canonico
+        where d.instrumento_canonico
+          and d.atividade_confirmada_b3
+          and d.isin_valido
           and not exists (
               select 1
               from investimento.ativos a
               where upper(trim(a.ticker)) = d.ticker
           )
     ) as novos_canonicos,
-    (
-        select count(*)
-        from tmp_b3_decisions d
-        where d.em_escopo_mestre
-          and not d.instrumento_canonico
-          and not exists (
-              select 1
-              from investimento.ativos a
-              where upper(trim(a.ticker)) = d.ticker
-          )
-    ) as novos_nao_canonicos,
     (
         select count(*)
         from tmp_b3_decisions d
@@ -1561,40 +1556,32 @@ select
     d.subclasse_preliminar,
     d.categoria_b3,
     coalesce(d.moeda, 'BRL'),
-    d.instrumento_canonico and d.atividade_confirmada_b3,
+    true,
     d.isin,
     %(source_code)s,
     %(source_url)s,
     d.categoria_b3,
     d.segmento_b3,
     d.mercado_b3,
-    d.instrumento_canonico,
-    d.tipo_variante_b3,
-    d.ticker_canonico,
-    case when d.instrumento_canonico then 'VALIDADO_B3'
-         else 'NAO_CANONICO'
-    end,
+    true,
+    null,
+    d.ticker,
+    'VALIDADO_B3',
     false,
-    case
-        when d.instrumento_canonico
-            then 'Canônico na B3; aguarda validações oficiais complementares obrigatórias da classe.'
-        else concat(
-            'Instrumento B3 não canônico: ',
-            d.tipo_variante_b3,
-            '.'
-        )
-    end,
+    'Canônico na B3; aguarda validações oficiais complementares obrigatórias da classe.',
     %(source_code)s,
     now(),
-    d.atividade_confirmada_b3,
-    d.status_atividade_b3,
-    d.motivo_atividade_b3,
+    true,
+    'CONFIRMADA',
+    null,
     d.data_referencia,
-    case when d.atividade_confirmada_b3 then now() else null end,
+    now(),
     now(),
     now()
 from tmp_b3_decisions d
-where d.em_escopo_mestre
+where d.instrumento_canonico = true
+  and d.atividade_confirmada_b3 = true
+  and d.isin_valido = true
   and not exists (
       select 1
       from investimento.ativos a
@@ -1791,6 +1778,12 @@ def main():
             ],
             "total_canonicos_pendentes_data_inicio": audit[
                 "total_canonicos_pendentes_data_inicio"
+            ],
+            "total_candidatos_novos_mestre": audit[
+                "total_candidatos_novos_mestre"
+            ],
+            "total_somente_snapshot_b3": audit[
+                "total_somente_snapshot_b3"
             ],
             "distribuicao_pendentes_data_inicio_classe": audit[
                 "distribuicao_pendentes_data_inicio_classe"

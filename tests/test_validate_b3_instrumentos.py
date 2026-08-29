@@ -26,6 +26,7 @@ _stub_optional_dependency("dotenv", load_dotenv=lambda *args, **kwargs: None)
 from src.jobs import validate_b3_instrumentos as job  # noqa: E402
 from src.jobs.validate_b3_instrumentos import (  # noqa: E402
     SnapshotSanityError,
+    INSERT_NEW_SQL,
     UPDATE_ABSENT_SQL,
     UPDATE_CANONICAL_SQL,
     annotate_universe,
@@ -33,6 +34,7 @@ from src.jobs.validate_b3_instrumentos import (  # noqa: E402
     build_audit,
     canonical_decision,
     normalize,
+    new_master_candidate,
     parse_csv,
     preliminary_classification,
     process_snapshot,
@@ -46,6 +48,12 @@ MIGRATION_009 = (
     / "db"
     / "migrations"
     / "009_controle_atividade_b3.sql"
+)
+MIGRATION_010 = (
+    Path(__file__).resolve().parents[1]
+    / "db"
+    / "migrations"
+    / "010_limpar_mestre_sem_atividade_b3.sql"
 )
 
 
@@ -405,6 +413,97 @@ class CanonicalRulesTest(unittest.TestCase):
 
 
 class ActivityGateAndSanityTest(unittest.TestCase):
+    def test_new_confirmed_canonical_is_master_candidate(self):
+        confirmed = instrument(
+            "NEW11", "ETF EQUITIES", isin="BRNEW1CTF001"
+        )
+
+        annotate_universe([confirmed], REFERENCE_DATE)
+
+        self.assertTrue(new_master_candidate(confirmed))
+        self.assertTrue(confirmed["em_escopo_mestre"])
+        normalized_sql = " ".join(INSERT_NEW_SQL.split())
+        self.assertIn("where d.instrumento_canonico = true", normalized_sql)
+        self.assertIn("and d.atividade_confirmada_b3 = true", normalized_sql)
+        self.assertIn("and d.isin_valido = true", normalized_sql)
+
+    def test_new_pending_start_canonical_is_not_master_candidate(self):
+        pending = instrument("003H11", "FUNDS", isin="BR003HCTF006")
+        pending["data_inicio_negociacao"] = None
+
+        annotate_universe([pending], REFERENCE_DATE)
+
+        self.assertEqual(pending["status_atividade_b3"], "PENDENTE_DATA_INICIO")
+        self.assertFalse(new_master_candidate(pending))
+        self.assertFalse(pending["em_escopo_mestre"])
+
+    def test_new_future_start_canonical_is_not_master_candidate(self):
+        future = instrument("FUTR11", "ETF EQUITIES", isin="BRFUTRCTF001")
+        future["data_inicio_negociacao"] = date(2026, 3, 1)
+
+        annotate_universe([future], REFERENCE_DATE)
+
+        self.assertEqual(future["status_atividade_b3"], "INICIO_FUTURO")
+        self.assertFalse(new_master_candidate(future))
+        self.assertFalse(future["em_escopo_mestre"])
+
+    def test_new_noncanonical_is_not_master_candidate(self):
+        variant = instrument(
+            "AFHI11M",
+            "FUNDS",
+            segment="EQUITY BLOCK TRADING LOT",
+            isin="BRAFHICTF005",
+        )
+
+        annotate_universe([variant], REFERENCE_DATE)
+
+        self.assertFalse(variant["instrumento_canonico"])
+        self.assertFalse(new_master_candidate(variant))
+        self.assertFalse(variant["em_escopo_mestre"])
+
+    def test_existing_asset_losing_activity_is_updated_not_deleted(self):
+        existing = instrument("KEEP11", "FUNDS", isin="BRKEEPCTF001")
+        annotate_universe([existing], REFERENCE_DATE)
+        self.assertTrue(existing["atividade_confirmada_b3"])
+
+        existing["data_fim_negociacao"] = date(2026, 2, 10)
+        annotate_universe([existing], REFERENCE_DATE)
+
+        self.assertFalse(existing["atividade_confirmada_b3"])
+        self.assertEqual(existing["status_atividade_b3"], "INATIVA_B3")
+        normalized_sql = " ".join(UPDATE_CANONICAL_SQL.split()).lower()
+        self.assertTrue(normalized_sql.startswith("update investimento.ativos"))
+        self.assertNotIn("delete", normalized_sql)
+        self.assertIn("elegivel_analise = case", normalized_sql)
+
+    def test_pending_asset_can_be_inserted_when_activity_becomes_confirmed(self):
+        pending = instrument("WAIT11", "FUNDS", isin="BRWAITCTF001")
+        pending["data_inicio_negociacao"] = None
+        annotate_universe([pending], REFERENCE_DATE)
+        self.assertFalse(new_master_candidate(pending))
+
+        pending["data_inicio_negociacao"] = REFERENCE_DATE
+        annotate_universe([pending], REFERENCE_DATE)
+
+        self.assertEqual(pending["status_atividade_b3"], "CONFIRMADA")
+        self.assertTrue(new_master_candidate(pending))
+
+    def test_cleanup_migration_is_idempotent_and_dependency_safe(self):
+        migration = MIGRATION_010.read_text(encoding="utf-8").lower()
+
+        for condition in (
+            "instrumento_canonico = true",
+            "atividade_confirmada_b3 = false",
+            "ultima_confirmacao_b3 is null",
+            "elegivel_analise = false",
+        ):
+            self.assertGreaterEqual(migration.count(condition), 2)
+        self.assertIn("pg_constraint", migration)
+        self.assertIn("constraint_row.confrelid", migration)
+        self.assertIn("for update of master", migration)
+        self.assertNotIn("truncate", migration)
+        self.assertNotIn("cascade", migration)
+
     def test_absent_asset_is_marked_without_delete(self):
         normalized_sql = " ".join(UPDATE_ABSENT_SQL.split())
 
@@ -687,8 +786,11 @@ class ActivityGateAndSanityTest(unittest.TestCase):
 
         self.assertTrue(sanity["valido"])
         self.assertEqual(status, "Final")
+        self.assertEqual(audit["total_bruto_snapshot"], 146_138)
         self.assertEqual(audit["total_canonicos_confirmados_b3"], 2_861)
         self.assertEqual(audit["total_canonicos_pendentes_data_inicio"], 482)
+        self.assertEqual(audit["total_candidatos_novos_mestre"], 2_861)
+        self.assertEqual(audit["total_somente_snapshot_b3"], 143_277)
         self.assertEqual(
             audit["distribuicao_status_atividade_canonicos"],
             {"CONFIRMADA": 2_861, "PENDENTE_DATA_INICIO": 482},
