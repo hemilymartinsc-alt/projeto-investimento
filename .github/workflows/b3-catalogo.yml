@@ -1,0 +1,37 @@
+name: B3 - Catálogo de Empresas e Tickers
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Uma vez por dia útil. O cadastro não precisa rodar a cada poucos minutos.
+    - cron: "45 6 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b3-catalogo
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Coletar catálogo da B3
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.jobs.collect_b3_catalogo
