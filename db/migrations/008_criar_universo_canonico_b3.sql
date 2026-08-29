@@ -129,14 +129,14 @@ select
     isin,
     codigo_cvm,
     moeda,
-    instrumento_canonico,
-    tipo_variante_b3,
-    ticker_canonico,
     status_validacao,
     elegivel_analise,
     fonte_cadastro,
     fonte_validacao,
     validado_em,
-    atualizado_em
+    atualizado_em,
+    instrumento_canonico,
+    tipo_variante_b3,
+    ticker_canonico
 from investimento.ativos
 where elegivel_analise = true;
