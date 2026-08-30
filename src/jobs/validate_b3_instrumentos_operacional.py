@@ -25,10 +25,9 @@ def is_financing_rate(inst) -> bool:
 
 
 def is_cepac(inst) -> bool:
-    ticker = base.upper(inst.get("ticker")) or ""
+    """Reconhece CEPAC pelo campo oficial de especificação da B3."""
     return bool(
-        ticker.endswith("11B")
-        and base.norm(inst.get("categoria_b3")) == "SHARES"
+        base.norm(inst.get("categoria_b3")) == "SHARES"
         and security_specification(inst).startswith("CPA")
     )
 

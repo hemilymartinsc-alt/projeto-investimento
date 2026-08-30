@@ -1,0 +1,22 @@
+CORREÇÃO CEPAC — 30/08/2026
+
+A execução #7 do workflow passou, mas a auditoria pós-execução encontrou dois CEPACs ativos ainda classificados como ACAO: PMSP12B e PMSP13B.
+
+Causa: a regra anterior exigia que o ticker terminasse em 11B.
+
+O snapshot oficial atual da B3 mostra seis instrumentos com categoria SHARES e SpcfctnCd iniciado por CPA: CTBA11B, MCRJ11B, PMSP11B, PMSP12B, PMSP13B e PMSP14B. PMSP14B ainda não entra no Cadastro Mestre porque a B3 não informou data de início de negociação.
+
+Nova regra: CEPAC = categoria_b3 SHARES + SpcfctnCd iniciado por CPA. A regra deixa de depender do número do ticker.
+
+Arquivos deste pacote:
+- src/jobs/validate_b3_instrumentos_operacional.py
+- tests/test_validate_b3_instrumentos_operacional.py
+
+Extraia na raiz do repositório substituindo os dois arquivos.
+
+GitHub Desktop Summary:
+Fix CEPAC classification across B3 series
+
+Commit to main -> Push origin -> rode novamente B3 - Validar e Classificar Instrumentos.
+
+A migration 016 continua bloqueada até a nova execução ficar verde e o Cadastro Mestre mostrar 487 ações confirmadas, não 489.

@@ -35,6 +35,19 @@ def test_cepac_nao_e_acao():
     assert job.preliminary_classification(inst) == ("OUTRO", "CEPAC")
 
 
+
+
+def test_cepac_nao_depende_do_sufixo_11b():
+    inst = instrumento(ticker="PMSP12B", nome_corporativo="PREFEITURA MUNICIPAL DE SAO PAULO", isin="BRPMSPCPA018", especificacao="CPA FLI MB")
+    assert job.is_cepac(inst) is True
+    assert job.preliminary_classification(inst) == ("OUTRO", "CEPAC")
+
+
+def test_cepac_pendente_futuro_tambem_classifica():
+    inst = instrumento(ticker="PMSP14B", nome_corporativo="PREFEITURA MUNICIPAL DE SAO PAULO", isin="BRPMSPCPA034", especificacao="CPA ATZ MB")
+    assert job.is_cepac(inst) is True
+    assert job.preliminary_classification(inst) == ("OUTRO", "CEPAC")
+
 def test_psvm11_nao_e_acao():
     inst = instrumento(ticker="PSVM11", nome_corporativo="PORTO SUDESTE V.M. S.A.", isin="BRPSVMTRV004", especificacao="TPR")
     assert job.is_royalty_security(inst) is True
