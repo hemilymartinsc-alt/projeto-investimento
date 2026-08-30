@@ -4,12 +4,15 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - wip/b3-fundos-oficial
     paths:
       - "src/jobs/coletar_b3_isin.py"
+      - "src/jobs/coletar_b3_isin_ativos.py"
       - "src/jobs/inspecionar_b3_isin.py"
       - ".github/workflows/b3-isin.yml"
       - "tests/test_coletar_b3_isin.py"
+      - "tests/test_coletar_b3_isin_ativos.py"
 
 permissions:
   contents: read
@@ -42,8 +45,9 @@ jobs:
       - name: Validar código
         run: |
           python -m py_compile src/jobs/coletar_b3_isin.py
+          python -m py_compile src/jobs/coletar_b3_isin_ativos.py
           python -m py_compile src/jobs/inspecionar_b3_isin.py
-          python -m pytest -q tests/test_coletar_b3_isin.py
+          python -m pytest -q tests/test_coletar_b3_isin.py tests/test_coletar_b3_isin_ativos.py
 
       - name: Auditar fonte oficial sem banco
         run: python -m src.jobs.inspecionar_b3_isin
@@ -73,7 +77,8 @@ jobs:
       - name: Validar código
         run: |
           python -m py_compile src/jobs/coletar_b3_isin.py
-          python -m pytest -q tests/test_coletar_b3_isin.py
+          python -m py_compile src/jobs/coletar_b3_isin_ativos.py
+          python -m pytest -q tests/test_coletar_b3_isin.py tests/test_coletar_b3_isin_ativos.py
 
-      - name: Coletar cadastro oficial B3 ISIN
-        run: python -m src.jobs.coletar_b3_isin
+      - name: Coletar somente ativos confirmados pela B3
+        run: python -m src.jobs.coletar_b3_isin_ativos

@@ -1,0 +1,18 @@
+AJUSTE — PERSISTIR SOMENTE ATIVOS CONFIRMADOS PELA B3
+
+Regra:
+- A B3 fornece o Banco de Dados Completo ISIN em um pacote único.
+- O GitHub Actions pode ler esse pacote completo em memória.
+- O Supabase NÃO recebe os ~361 mil ISINs nem os ~69 mil emissores.
+- São persistidos somente os ISINs que já existem em investimento.ativos com:
+  instrumento_canonico = true
+  atividade_confirmada_b3 = true
+- Também são persistidas somente as linhas de emissores necessárias para esses ISINs.
+- No estado atual esperado: 2.861 ativos B3, dos quais 583 são fundos.
+- Nenhum ativo inativo entra na camada operacional.
+
+Arquivos deste pacote:
+- src/jobs/coletar_b3_isin_ativos.py
+- tests/test_coletar_b3_isin_ativos.py
+- .github/workflows/b3-isin.yml
+- db/migrations/014_restringir_b3_isin_a_ativos_b3.sql
