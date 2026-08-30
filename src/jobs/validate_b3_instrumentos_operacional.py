@@ -6,10 +6,16 @@ FINANCING_RATE_NAME = "TAXA DE FINANCIAMENTO"
 FINANCING_RATE_VARIANT = "FINANCING_RATE"
 
 _original_canonical_decision = base.canonical_decision
+_original_preliminary_classification = base.preliminary_classification
 _original_load_latest_valid_snapshot_profile = base.load_latest_valid_snapshot_profile
 
+
+def security_specification(inst) -> str:
+    raw = inst.get("raw_json") or {}
+    return base.norm(raw.get("SpcfctnCd"))
+
+
 def is_financing_rate(inst) -> bool:
-    """Reconhece a família técnica TAXA da B3 sem usar ticker isoladamente."""
     ticker = base.upper(inst.get("ticker")) or ""
     return bool(
         ticker.startswith("TAXA")
@@ -17,16 +23,53 @@ def is_financing_rate(inst) -> bool:
         and base.norm(inst.get("nome_corporativo")) == FINANCING_RATE_NAME
     )
 
+
+def is_cepac(inst) -> bool:
+    ticker = base.upper(inst.get("ticker")) or ""
+    return bool(
+        ticker.endswith("11B")
+        and base.norm(inst.get("categoria_b3")) == "SHARES"
+        and security_specification(inst).startswith("CPA")
+    )
+
+
+def is_royalty_security(inst) -> bool:
+    return bool(
+        base.upper(inst.get("ticker")) == "PSVM11"
+        and base.upper(inst.get("isin")) == "BRPSVMTRV004"
+        and base.norm(inst.get("categoria_b3")) == "SHARES"
+        and security_specification(inst) == "TPR"
+    )
+
+
+def is_bdr_unit(inst) -> bool:
+    return bool(
+        base.upper(inst.get("ticker")) == "PPLA11"
+        and base.upper(inst.get("isin")) == "BRPPLAUNT007"
+        and base.norm(inst.get("categoria_b3")) == "UNIT"
+        and base.norm(inst.get("nome_corporativo")) == "PPLA PARTICIPATIONS LTD."
+    )
+
+
 def canonical_decision(inst, ref, fixed_income_etf_keys=frozenset()):
     if is_financing_rate(inst):
         return False, FINANCING_RATE_VARIANT
     return _original_canonical_decision(inst, ref, fixed_income_etf_keys)
 
+
+def preliminary_classification(inst):
+    if is_cepac(inst):
+        return "OUTRO", "CEPAC"
+    if is_royalty_security(inst):
+        return "OUTRO", "ROYALTY_SECURITY"
+    if is_bdr_unit(inst):
+        return "BDR", "UNIT_BDR"
+    return _original_preliminary_classification(inst)
+
+
 def _previous_financing_rate_counts(conn):
-    """Conta TAXA que ainda conste como canônica no snapshot anterior legado."""
     with conn.cursor() as cur:
-        cur.execute(
-            """
+        cur.execute("""
             with ultima_referencia as (
                 select max(data_referencia) as data_referencia
                 from investimento.b3_instrumentos_snapshot
@@ -38,26 +81,21 @@ def _previous_financing_rate_counts(conn):
                     where s.instrumento_canonico = true
                       and nullif(s.data_inicio_negociacao, date '9999-12-31') is not null
                       and nullif(s.data_inicio_negociacao, date '9999-12-31') <= s.data_referencia
-                      and (
-                          nullif(s.data_fim_negociacao, date '9999-12-31') is null
-                          or nullif(s.data_fim_negociacao, date '9999-12-31') >= s.data_referencia
-                      )
-                      and (
-                          nullif(s.data_expiracao, date '9999-12-31') is null
-                          or nullif(s.data_expiracao, date '9999-12-31') >= s.data_referencia
-                      )
+                      and (nullif(s.data_fim_negociacao, date '9999-12-31') is null
+                           or nullif(s.data_fim_negociacao, date '9999-12-31') >= s.data_referencia)
+                      and (nullif(s.data_expiracao, date '9999-12-31') is null
+                           or nullif(s.data_expiracao, date '9999-12-31') >= s.data_referencia)
                 ) as confirmados
             from investimento.b3_instrumentos_snapshot s
-            join ultima_referencia u
-              on u.data_referencia = s.data_referencia
+            join ultima_referencia u on u.data_referencia = s.data_referencia
             where s.status_arquivo = 'Final'
               and upper(trim(s.ticker)) like 'TAXA%'
               and upper(trim(coalesce(s.categoria_b3, ''))) = 'SHARES'
               and upper(trim(coalesce(s.nome_corporativo, ''))) = 'TAXA DE FINANCIAMENTO'
-            """
-        )
+        """)
         row = cur.fetchone() or (0, 0)
     return int(row[0] or 0), int(row[1] or 0)
+
 
 def load_latest_valid_snapshot_profile(conn):
     profile = _original_load_latest_valid_snapshot_profile(conn)
@@ -78,10 +116,13 @@ def load_latest_valid_snapshot_profile(conn):
     }
     return adjusted
 
+
 def main():
     base.canonical_decision = canonical_decision
+    base.preliminary_classification = preliminary_classification
     base.load_latest_valid_snapshot_profile = load_latest_valid_snapshot_profile
     return base.main()
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

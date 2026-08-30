@@ -1,0 +1,38 @@
+ETAPA — CORRIGIR CLASSIFICAÇÃO E VALIDAR AÇÕES
+
+Diagnóstico oficial:
+- 494 registros preliminares como ACAO após remover TAXA.
+- 5 são CEPACs: CTBA11B, MCRJ11B, PMSP11B, PMSP12B, PMSP13B.
+- PSVM11 é valor mobiliário baseado em royalties, não ação.
+- PPLA11 é Unit composta por BDRs.
+- Restam 487 ações brasileiras reais.
+
+Validação das 487 ações:
+B3 Instruments -> B3 Empresas Listadas -> código CVM exato -> CVM Cadastro de Companhias.
+Cobertura: 487/487 com empresa B3 e código CVM exato.
+
+Regra operacional:
+- CVM ATIVO: validável.
+- Recuperação judicial/extrajudicial: continua analisável, com risco elevado depois.
+- Fase pré-operacional: continua analisável.
+- Registro CVM suspenso, liquidação extrajudicial ou emissor paralisado: fora da ferramenta.
+
+Resultado esperado após migration 016:
+- 482 ações elegíveis.
+- 5 ações fora da ferramenta por situação atual.
+- PPLA11 -> BDR / UNIT_BDR.
+- CEPACs e PSVM11 -> OUTRO.
+- 562 fundos elegíveis preservados.
+- Total elegível = 1.044.
+
+APLICAÇÃO
+Extraia o ZIP em:
+C:\Users\Hemily\Documents\GitHub\projeto-investimento
+
+GitHub Desktop Summary:
+Classify B3 equity exceptions and validate stocks
+
+Commit to main -> Push origin.
+Depois rode:
+Actions -> B3 - Validar e Classificar Instrumentos -> Run workflow -> main.
+A migration 016 será aplicada ao Supabase depois da validação verde do workflow.
