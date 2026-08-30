@@ -1,0 +1,65 @@
+ETAPA — PROGRAMAS OFICIAIS DE BDR / BANCO B3
+
+Objetivo
+--------
+Criar uma camada oficial própria para validar programas vigentes de BDR antes
+de alterar qualquer elegibilidade do Cadastro Mestre.
+
+Fontes oficiais
+---------------
+1) Banco B3 — BDR Não Patrocinado
+   https://finservices.b3.com.br/bdr-nao-patrocinado/programas
+
+2) Banco B3 — BDR de ETF
+   https://finservices.b3.com.br/bdr-de-etf/programa
+
+Na auditoria de 30/08/2026, as páginas oficiais exibiam:
+- BDR Não Patrocinado: 790 programas.
+- BDR de ETF: 310 programas.
+
+O coletor NÃO usa nome para decidir se um BDR é ETF. O endpoint oficial em que
+o ticker aparece é a evidência da natureza do programa.
+
+Sanidade / fail-closed
+----------------------
+- coleta paginada a 60 registros;
+- exige que o total extraído seja igual ao total informado pela própria página;
+- mínimo de 700 Não Patrocinados;
+- mínimo de 250 BDRs de ETF;
+- zero ticker duplicado;
+- zero ticker simultaneamente nos dois tipos;
+- variação máxima de 15% contra o último snapshot válido;
+- qualquer falha impede a substituição do snapshot do dia.
+
+O que esta etapa NÃO faz
+------------------------
+- NÃO valida BDR no Cadastro Mestre;
+- NÃO muda status_validacao;
+- NÃO muda elegivel_analise;
+- NÃO reclassifica ETF x ETP ainda.
+
+Ela apenas cria e alimenta a memória oficial necessária para a próxima etapa.
+
+Arquivos
+--------
+- db/migrations/017_criar_programas_bdr_b3.sql
+- src/jobs/coletar_b3_programas_bdr.py
+- tests/test_coletar_b3_programas_bdr.py
+- .github/workflows/b3-bdr-programas.yml
+
+Aplicação
+---------
+Extraia na raiz:
+C:\Users\Hemily\Documents\GitHub\projeto-investimento
+
+GitHub Desktop:
+Summary:
+Add official B3 BDR program collector
+
+Commit to main -> Push origin.
+
+Depois será aplicada a migration 017 no Supabase e executado o workflow:
+B3 - Coletar Programas de BDR
+
+Só após a auditoria do snapshot coletado será preparada a migration que altera
+o Cadastro Mestre.
