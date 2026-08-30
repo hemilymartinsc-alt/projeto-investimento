@@ -1,17 +1,18 @@
-PACOTE CONSOLIDADO — B3 FUNDOS OFICIAL
+CORREÇÃO CONSOLIDADA — B3 ISIN
 
-Objetivo:
-- uma única extração no repositório;
-- uma única sequência Commit + Push;
-- no push, o GitHub Actions executa apenas inspeção/auditoria sem banco;
-- depois da auditoria verde, a Migration 013 pode ser aplicada;
-- a coleta definitiva é executada manualmente pelo mesmo workflow, sem novo download.
+Esta correção foi criada após o primeiro push do pacote consolidado revelar
+duas condições reais:
 
-Arquivos:
-- db/migrations/013_criar_cadastro_b3_isin.sql
-- src/jobs/coletar_b3_isin.py
-- src/jobs/inspecionar_b3_isin.py
-- tests/test_coletar_b3_isin.py
-- .github/workflows/b3-isin.yml
+1) o comando pytest precisava ser executado como `python -m pytest` no runner;
+2) EMISSOR.TXT contém códigos de emissor repetidos (exemplo observado: AGMO).
 
-Nenhum arquivo deste pacote altera investimento.ativos.
+A correção:
+- preserva duplicidades oficiais em vez de descartá-las;
+- bloqueia qualquer ponte ambígua;
+- cria uma view fail-closed apenas para ISIN -> emissor -> CNPJ unívoco;
+- corrige o status de coletas_log para INICIADO;
+- desativa o workflow legado automático;
+- não altera investimento.ativos;
+- no push, faz apenas teste + auditoria sem banco.
+
+NÃO aplicar a Migration 013 manualmente antes de o workflow de auditoria ficar verde.

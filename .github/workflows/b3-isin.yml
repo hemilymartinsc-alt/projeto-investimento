@@ -43,7 +43,7 @@ jobs:
         run: |
           python -m py_compile src/jobs/coletar_b3_isin.py
           python -m py_compile src/jobs/inspecionar_b3_isin.py
-          pytest -q tests/test_coletar_b3_isin.py
+          python -m pytest -q tests/test_coletar_b3_isin.py
 
       - name: Auditar fonte oficial sem banco
         run: python -m src.jobs.inspecionar_b3_isin
@@ -73,7 +73,7 @@ jobs:
       - name: Validar código
         run: |
           python -m py_compile src/jobs/coletar_b3_isin.py
-          pytest -q tests/test_coletar_b3_isin.py
+          python -m pytest -q tests/test_coletar_b3_isin.py
 
       - name: Coletar cadastro oficial B3 ISIN
         run: python -m src.jobs.coletar_b3_isin

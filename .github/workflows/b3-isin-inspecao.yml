@@ -1,41 +1,16 @@
-name: B3 - Inspecionar fonte ISIN
+name: LEGADO - B3 Inspecao ISIN desativada
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - wip/b3-fundos-oficial
-    paths:
-      - "src/jobs/inspecionar_b3_isin.py"
-      - ".github/workflows/b3-isin-inspecao.yml"
 
 permissions:
   contents: read
 
-concurrency:
-  group: b3-isin-inspecao
-  cancel-in-progress: false
-
 jobs:
-  inspect:
+  retired:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
     steps:
-      - name: Baixar repositório
-        uses: actions/checkout@v4
-
-      - name: Configurar Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          cache: pip
-
-      - name: Instalar dependências
-        run: pip install -r requirements.txt
-
-      - name: Compilar probe
-        run: python -m py_compile src/jobs/inspecionar_b3_isin.py
-
-      - name: Inspecionar fontes oficiais B3
-        run: python -m src.jobs.inspecionar_b3_isin
+      - name: Aviso
+        run: |
+          echo "Workflow legado desativado."
+          echo "Use: B3 - Cadastro oficial ISIN."
