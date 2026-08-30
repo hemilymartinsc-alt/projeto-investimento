@@ -1,0 +1,17 @@
+PACOTE CONSOLIDADO — B3 FUNDOS OFICIAL
+
+Objetivo:
+- uma única extração no repositório;
+- uma única sequência Commit + Push;
+- no push, o GitHub Actions executa apenas inspeção/auditoria sem banco;
+- depois da auditoria verde, a Migration 013 pode ser aplicada;
+- a coleta definitiva é executada manualmente pelo mesmo workflow, sem novo download.
+
+Arquivos:
+- db/migrations/013_criar_cadastro_b3_isin.sql
+- src/jobs/coletar_b3_isin.py
+- src/jobs/inspecionar_b3_isin.py
+- tests/test_coletar_b3_isin.py
+- .github/workflows/b3-isin.yml
+
+Nenhum arquivo deste pacote altera investimento.ativos.

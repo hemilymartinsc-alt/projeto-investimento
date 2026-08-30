@@ -1,0 +1,79 @@
+name: B3 - Cadastro oficial ISIN
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - wip/b3-fundos-oficial
+    paths:
+      - "src/jobs/coletar_b3_isin.py"
+      - "src/jobs/inspecionar_b3_isin.py"
+      - ".github/workflows/b3-isin.yml"
+      - "tests/test_coletar_b3_isin.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b3-isin-oficial
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Validar código
+        run: |
+          python -m py_compile src/jobs/coletar_b3_isin.py
+          python -m py_compile src/jobs/inspecionar_b3_isin.py
+          pytest -q tests/test_coletar_b3_isin.py
+
+      - name: Auditar fonte oficial sem banco
+        run: python -m src.jobs.inspecionar_b3_isin
+
+  collect:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Validar código
+        run: |
+          python -m py_compile src/jobs/coletar_b3_isin.py
+          pytest -q tests/test_coletar_b3_isin.py
+
+      - name: Coletar cadastro oficial B3 ISIN
+        run: python -m src.jobs.coletar_b3_isin
