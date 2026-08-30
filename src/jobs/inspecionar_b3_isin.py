@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import csv
+import gzip
 import io
 import json
 import re
+from zipfile import BadZipFile, ZipFile
 
 import requests
 
@@ -57,33 +59,68 @@ def request(session: requests.Session, url: str) -> requests.Response:
 
 
 def decode_text(content: bytes) -> tuple[str, str]:
-    for encoding in ("utf-8-sig", "utf-8", "latin-1"):
+    encodings = ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be", "latin-1")
+    for encoding in encodings:
         try:
-            return content.decode(encoding, errors="strict"), encoding
+            text = content.decode(encoding, errors="strict")
         except UnicodeDecodeError:
             continue
-    raise B3InspectionError("não foi possível identificar encoding do arquivo")
+        # Evita aceitar latin-1 para conteúdo claramente binário.
+        if encoding == "latin-1":
+            sample = text[:4000]
+            printable = sum(ch.isprintable() or ch in "\r\n\t" for ch in sample)
+            if sample and printable / len(sample) < 0.75:
+                continue
+        return text, encoding
+    raise B3InspectionError("conteúdo não parece texto em encoding suportado")
 
 
-def detect_delimiter(sample: str) -> str:
-    first_lines = "\n".join(sample.splitlines()[:10])
+def sanitize_preview(text: str) -> str:
+    # Não publicar documentos completos nos logs.
+    text = re.sub(r"(?<!\d)(\d{14})(?!\d)", lambda m: "***" + m.group(1)[-4:], text)
+    text = re.sub(
+        r"(?<!\d)(\d{2}[.\s]?\d{3}[.\s]?\d{3}[/\s]?\d{4}[-\s]?\d{2})(?!\d)",
+        "***CNPJ***",
+        text,
+    )
+    return text.replace("\x00", "\\0")
+
+
+def binary_diagnostics(label: str, content: bytes) -> dict:
+    sample = content[:128]
+    result = {
+        "label": label,
+        "bytes": len(content),
+        "magic_hex": sample[:16].hex(),
+        "starts_zip": content.startswith(b"PK\x03\x04"),
+        "starts_gzip": content.startswith(b"\x1f\x8b"),
+        "newline_count_first_64k": content[:65536].count(b"\n"),
+        "carriage_return_count_first_64k": content[:65536].count(b"\r"),
+    }
+    progress("DIAGNOSTICO_BINARIO | " + json.dumps(result, sort_keys=True))
+    return result
+
+
+def detect_delimiter(text: str) -> str | None:
+    lines = [line for line in text.splitlines() if line.strip()][:20]
+    if not lines:
+        return None
+    sample = "\n".join(lines)
     try:
-        dialect = csv.Sniffer().sniff(first_lines, delimiters=";,|\t")
-        return dialect.delimiter
+        return csv.Sniffer().sniff(sample, delimiters=";,|\t").delimiter
     except csv.Error:
         candidates = [";", ",", "|", "\t"]
-        first = sample.splitlines()[0] if sample.splitlines() else ""
-        counts = {delimiter: first.count(delimiter) for delimiter in candidates}
+        counts = {
+            delimiter: sum(line.count(delimiter) for line in lines[:5])
+            for delimiter in candidates
+        }
         delimiter, total = max(counts.items(), key=lambda item: item[1])
-        if total <= 0:
-            raise B3InspectionError("delimitador não identificado")
-        return delimiter
+        return delimiter if total > 0 else None
 
 
 def normalized_header(value: str) -> str:
     value = value.strip().upper()
-    value = re.sub(r"\s+", " ", value)
-    return value
+    return re.sub(r"\s+", " ", value)
 
 
 def mask_document(value: str | None) -> str | None:
@@ -95,11 +132,30 @@ def mask_document(value: str | None) -> str | None:
     return f"***{digits[-4:]}"
 
 
-def inspect_delimited_file(label: str, content: bytes) -> dict:
+def inspect_text(label: str, content: bytes) -> dict:
     text, encoding = decode_text(content)
+    lines = [line for line in text.splitlines() if line.strip()]
     delimiter = detect_delimiter(text)
+
+    if delimiter is None:
+        previews = [sanitize_preview(line[:500]) for line in lines[:5]]
+        result = {
+            "label": label,
+            "format": "TEXT_NO_DELIMITER",
+            "bytes": len(content),
+            "encoding": encoding,
+            "line_count": len(lines),
+            "first_line_length": len(lines[0]) if lines else 0,
+            "previews": previews,
+        }
+        progress("TEXTO_SEM_DELIMITADOR | " + json.dumps(
+            result, ensure_ascii=False, sort_keys=True
+        ))
+        return result
+
     reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=delimiter)
-    headers = [normalized_header(header) for header in reader.fieldnames or []]
+    headers = list(reader.fieldnames or [])
+    normalized_headers = [normalized_header(header) for header in headers]
     if not headers:
         raise B3InspectionError(f"{label}: arquivo sem cabeçalho")
 
@@ -109,13 +165,14 @@ def inspect_delimited_file(label: str, content: bytes) -> dict:
     issuer_code_nonempty = 0
     samples: list[dict] = []
     header_by_normalized = {
-        normalized_header(raw): raw for raw in reader.fieldnames or [] if raw
+        normalized_header(raw): raw for raw in headers if raw
     }
 
-    isin_headers = [h for h in headers if "ISIN" in h]
-    cnpj_headers = [h for h in headers if "CNPJ" in h]
+    isin_headers = [h for h in normalized_headers if "ISIN" in h]
+    cnpj_headers = [h for h in normalized_headers if "CNPJ" in h]
     issuer_code_headers = [
-        h for h in headers if "EMISSOR" in h and ("COD" in h or "CÓD" in h)
+        h for h in normalized_headers
+        if "EMISSOR" in h and ("COD" in h or "CÓD" in h)
     ]
 
     for row in reader:
@@ -135,19 +192,20 @@ def inspect_delimited_file(label: str, content: bytes) -> dict:
                 issuer_code_nonempty += 1
         if len(samples) < 3:
             sample = {}
-            for header in reader.fieldnames or []:
+            for header in headers:
                 value = (row.get(header) or "").strip()
                 if "CNPJ" in normalized_header(header):
                     value = mask_document(value) or ""
-                sample[header] = value[:120]
+                sample[header] = sanitize_preview(value[:120])
             samples.append(sample)
 
     result = {
         "label": label,
+        "format": "DELIMITED_TEXT",
         "bytes": len(content),
         "encoding": encoding,
         "delimiter_repr": repr(delimiter),
-        "headers": list(reader.fieldnames or []),
+        "headers": headers,
         "rows": rows,
         "isin_headers": isin_headers,
         "cnpj_headers": cnpj_headers,
@@ -157,8 +215,60 @@ def inspect_delimited_file(label: str, content: bytes) -> dict:
         "issuer_code_nonempty": issuer_code_nonempty,
         "samples": samples,
     }
-    progress(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    progress("ARQUIVO_DELIMITADO | " + json.dumps(
+        result, ensure_ascii=False, sort_keys=True
+    ))
     return result
+
+
+def inspect_zip(label: str, content: bytes) -> dict:
+    try:
+        with ZipFile(io.BytesIO(content)) as archive:
+            bad = archive.testzip()
+            names = [name for name in archive.namelist() if not name.endswith("/")]
+            result = {
+                "label": label,
+                "format": "ZIP",
+                "bytes": len(content),
+                "corrupt_member": bad,
+                "members_count": len(names),
+                "members": names[:50],
+            }
+            progress("ZIP | " + json.dumps(result, ensure_ascii=False, sort_keys=True))
+            members = []
+            for name in names[:25]:
+                payload = archive.read(name)
+                member_label = f"{label}::{name}"
+                try:
+                    members.append(inspect_payload(member_label, payload, nested=True))
+                except Exception as exc:
+                    diag = binary_diagnostics(member_label, payload)
+                    diag["erro"] = str(exc)
+                    members.append(diag)
+            result["member_results"] = members
+            return result
+    except BadZipFile as exc:
+        raise B3InspectionError(f"{label}: assinatura ZIP inválida") from exc
+
+
+def inspect_payload(label: str, content: bytes, *, nested: bool = False) -> dict:
+    binary_diagnostics(label, content)
+
+    if content.startswith(b"PK\x03\x04"):
+        if nested:
+            return {
+                "label": label,
+                "format": "NESTED_ZIP_SKIPPED",
+                "bytes": len(content),
+            }
+        return inspect_zip(label, content)
+
+    if content.startswith(b"\x1f\x8b"):
+        decompressed = gzip.decompress(content)
+        progress(f"GZIP | label={label} bytes_descomprimidos={len(decompressed)}")
+        return inspect_payload(f"{label}::gzip", decompressed, nested=nested)
+
+    return inspect_text(label, content)
 
 
 def inspect_isin(session: requests.Session) -> dict:
@@ -183,6 +293,7 @@ def inspect_isin(session: requests.Session) -> dict:
             {
                 "metadata_keys": sorted(metadata.keys()),
                 "geralPt_keys": sorted(geral_pt.keys()),
+                "dataGeracao": geral_pt.get("dataGeracao"),
                 "content_type": file_response.headers.get("Content-Type"),
                 "content_disposition": file_response.headers.get(
                     "Content-Disposition"
@@ -193,7 +304,7 @@ def inspect_isin(session: requests.Session) -> dict:
             sort_keys=True,
         )
     )
-    return inspect_delimited_file("B3_ISIN", file_response.content)
+    return inspect_payload("B3_ISIN", file_response.content)
 
 
 def inspect_fund_download(session: requests.Session, type_fund: int) -> dict:
@@ -204,44 +315,36 @@ def inspect_fund_download(session: requests.Session, type_fund: int) -> dict:
         f"funds type={type_fund} content_type="
         f"{response.headers.get('Content-Type')} bytes={len(response.content)}"
     )
-    return inspect_delimited_file(
-        f"B3_FUNDS_TYPE_{type_fund}", response.content
-    )
+    return inspect_payload(f"B3_FUNDS_TYPE_{type_fund}", response.content)
 
 
 def main() -> None:
-    progress("iniciando inspeção somente leitura das fontes oficiais B3")
+    progress("iniciando inspeção v2 somente leitura das fontes oficiais B3")
+    results = {}
     with requests.Session() as session:
-        isin = inspect_isin(session)
-        fund_results = {}
-        for type_fund in (7, 27):
-            try:
-                fund_results[type_fund] = inspect_fund_download(
-                    session, type_fund
-                )
-            except Exception as exc:
-                fund_results[type_fund] = {"erro": str(exc)}
-                progress(
-                    f"funds type={type_fund} indisponível para inspeção: {exc}"
-                )
+        try:
+            results["isin"] = inspect_isin(session)
+        except Exception as exc:
+            results["isin"] = {"erro": str(exc)}
+            progress(f"ISIN: diagnóstico parcial concluído com erro: {exc}")
 
-    summary = {
-        "isin_rows": isin["rows"],
-        "isin_unique": isin["unique_isin"],
-        "isin_cnpj_nonempty": isin["cnpj_nonempty"],
-        "isin_issuer_code_nonempty": isin["issuer_code_nonempty"],
-        "fund_types": {
-            str(key): {
-                "rows": value.get("rows"),
-                "headers": value.get("headers"),
-                "erro": value.get("erro"),
-            }
-            for key, value in fund_results.items()
-        },
-    }
+        for type_fund in (7, 27):
+            key = f"funds_type_{type_fund}"
+            try:
+                results[key] = inspect_fund_download(session, type_fund)
+            except Exception as exc:
+                results[key] = {"erro": str(exc)}
+                progress(f"funds type={type_fund}: diagnóstico parcial: {exc}")
+
     progress(
-        "SUCESSO | " + json.dumps(summary, ensure_ascii=False, sort_keys=True)
+        "FIM_DIAGNOSTICO | "
+        + json.dumps(results, ensure_ascii=False, sort_keys=True)[:12000]
     )
+
+    # A sonda é diagnóstica: só falha se nenhuma das três fontes respondeu.
+    successes = sum(1 for value in results.values() if "erro" not in value)
+    if successes == 0:
+        raise B3InspectionError("nenhuma fonte B3 pôde ser inspecionada")
 
 
 if __name__ == "__main__":
