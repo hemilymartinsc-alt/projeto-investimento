@@ -1,0 +1,24 @@
+AJUSTE B3 — TAXA DE FINANCIAMENTO
+
+Já aplicado no Supabase:
+- 435 falsos positivos TAXA removidos do Cadastro Mestre;
+- 0 dependências operacionais;
+- snapshot bruto B3 preservado;
+- Cadastro Mestre: 2.426 registros;
+- ações candidatas reais: 494;
+- fundos elegíveis oficiais continuam: 562.
+
+Este pacote impede que TAXA volte a entrar.
+
+Aplicar na raiz:
+C:\Users\Hemily\Documents\GitHub\projeto-investimento
+
+GitHub Desktop — Summary:
+Exclude financing-rate instruments from B3 master
+
+Depois: Commit to main > Push origin.
+
+Em seguida execute:
+Actions > B3 - Validar e Classificar Instrumentos > Run workflow > main
+
+Esperado: workflow verde; TAXA=0; ações reais=494.

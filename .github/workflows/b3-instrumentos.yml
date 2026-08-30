@@ -29,9 +29,12 @@ jobs:
           cache: "pip"
 
       - name: Instalar dependências
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pytest
+
+      - name: Testar classificação B3
+        run: pytest -q tests/test_validate_b3_instrumentos.py tests/test_validate_b3_instrumentos_operacional.py
 
       - name: Validar e classificar instrumentos da B3
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python -m src.jobs.validate_b3_instrumentos
+        run: python -m src.jobs.validate_b3_instrumentos_operacional
