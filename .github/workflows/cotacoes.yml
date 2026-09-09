@@ -1,0 +1,50 @@
+name: B3 - Cotações Diárias
+
+on:
+  workflow_dispatch:
+    inputs:
+      data:
+        description: "Data opcional no formato AAAA-MM-DD"
+        required: false
+        type: string
+
+  schedule:
+    # 21:30 UTC = 18:30 no horário de Brasília.
+    # Segunda a sexta.
+    - cron: "30 21 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cotacoes-b3
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Coletar cotações B3
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATA_MANUAL: ${{ inputs.data }}
+        run: |
+          if [ -n "$DATA_MANUAL" ]; then
+            python -m src.jobs.coletar_cotacoes --data "$DATA_MANUAL"
+          else
+            python -m src.jobs.coletar_cotacoes
+          fi
