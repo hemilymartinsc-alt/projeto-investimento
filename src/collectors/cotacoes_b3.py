@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from io import BytesIO
@@ -21,7 +22,7 @@ HEADERS = {
     "Accept": "*/*",
 }
 
-TIMEOUT = 60
+TIMEOUT = 300
 
 
 @dataclass(slots=True)
@@ -39,8 +40,10 @@ class Cotacao:
 
 def _preco(campo: str) -> float:
     campo = campo.strip()
+
     if not campo:
         return 0.0
+
     return int(campo) / 100
 
 
@@ -57,17 +60,20 @@ def parse_linha(
 
     # Mercado à vista.
     tipo_mercado = linha[24:27]
+
     if tipo_mercado != "010":
         return None
 
     ticker = linha[12:24].strip().upper()
 
     ativo_id = ativos_por_ticker.get(ticker)
+
     if ativo_id is None:
         return None
 
     data_pregao = datetime.strptime(
-        linha[2:10], "%Y%m%d"
+        linha[2:10],
+        "%Y%m%d",
     ).date()
 
     abertura = _preco(linha[56:69])
@@ -83,7 +89,13 @@ def parse_linha(
     if maxima < minima:
         return None
 
-    if abertura < 0 or minima < 0 or volume < 0:
+    if abertura < 0:
+        return None
+
+    if minima < 0:
+        return None
+
+    if volume < 0:
         return None
 
     return Cotacao(
@@ -112,6 +124,7 @@ def carregar_universo(conn) -> dict[str, int]:
               and ticker is not null
             """
         )
+
         rows = cur.fetchall()
 
     return {
@@ -121,53 +134,139 @@ def carregar_universo(conn) -> dict[str, int]:
 
 
 def _baixar(url: str) -> bytes:
-    response = requests.get(
-        url,
-        headers=HEADERS,
-        timeout=TIMEOUT,
+    ultimo_erro: Exception | None = None
+
+    for tentativa in range(1, 6):
+        try:
+            print(
+                f"Baixando arquivo B3 "
+                f"(tentativa {tentativa}/5): {url}"
+            )
+
+            with requests.get(
+                url,
+                headers=HEADERS,
+                timeout=(30, TIMEOUT),
+                stream=True,
+            ) as response:
+                response.raise_for_status()
+
+                partes: list[bytes] = []
+                total_recebido = 0
+
+                for chunk in response.iter_content(
+                    chunk_size=1024 * 1024
+                ):
+                    if not chunk:
+                        continue
+
+                    partes.append(chunk)
+                    total_recebido += len(chunk)
+
+                conteudo = b"".join(partes)
+
+                tamanho_esperado = response.headers.get(
+                    "Content-Length"
+                )
+
+                if tamanho_esperado:
+                    esperado = int(tamanho_esperado)
+
+                    if total_recebido != esperado:
+                        raise RuntimeError(
+                            "Download incompleto da B3: "
+                            f"recebidos={total_recebido} "
+                            f"esperados={esperado}"
+                        )
+
+                if len(conteudo) < 100:
+                    raise RuntimeError(
+                        f"Arquivo B3 muito pequeno/inválido: {url}"
+                    )
+
+                print(
+                    f"Download concluído: "
+                    f"{len(conteudo)} bytes"
+                )
+
+                return conteudo
+
+        except (
+            requests.RequestException,
+            RuntimeError,
+        ) as exc:
+            ultimo_erro = exc
+
+            print(
+                f"Tentativa {tentativa}/5 falhou: {exc}"
+            )
+
+            if tentativa < 5:
+                espera = tentativa * 5
+
+                print(
+                    f"Aguardando {espera}s antes "
+                    f"da próxima tentativa..."
+                )
+
+                time.sleep(espera)
+
+    raise RuntimeError(
+        "Falha ao baixar arquivo da B3 "
+        f"após 5 tentativas: {ultimo_erro}"
     )
-    response.raise_for_status()
-
-    conteudo = response.content
-
-    if len(conteudo) < 100:
-        raise RuntimeError(
-            f"Arquivo B3 muito pequeno/inválido: {url}"
-        )
-
-    return conteudo
 
 
 def baixar_anual(ano: int) -> bytes:
     nome = f"COTAHIST_A{ano}.ZIP"
-    return _baixar(f"{BASE_URL}/{nome}")
+
+    return _baixar(
+        f"{BASE_URL}/{nome}"
+    )
 
 
-def baixar_diario(data_ref: date) -> bytes:
+def baixar_diario(
+    data_ref: date,
+) -> bytes:
     nome = (
         f"COTAHIST_D"
         f"{data_ref.day:02d}"
         f"{data_ref.month:02d}"
         f"{data_ref.year}.ZIP"
     )
-    return _baixar(f"{BASE_URL}/{nome}")
+
+    return _baixar(
+        f"{BASE_URL}/{nome}"
+    )
 
 
-def extrair_txt(conteudo_zip: bytes) -> list[str]:
-    with ZipFile(BytesIO(conteudo_zip)) as arquivo:
-        nomes = [
-            nome
-            for nome in arquivo.namelist()
-            if nome.lower().endswith(".txt")
-        ]
+def extrair_txt(
+    conteudo_zip: bytes,
+) -> list[str]:
+    try:
+        with ZipFile(
+            BytesIO(conteudo_zip)
+        ) as arquivo:
+            nomes = [
+                nome
+                for nome in arquivo.namelist()
+                if nome.lower().endswith(".txt")
+            ]
 
-        if not nomes:
-            raise RuntimeError(
-                "ZIP da B3 não contém arquivo TXT."
-            )
+            if not nomes:
+                raise RuntimeError(
+                    "ZIP da B3 não contém arquivo TXT."
+                )
 
-        with arquivo.open(nomes[0]) as bruto:
-            conteudo = bruto.read()
+            with arquivo.open(
+                nomes[0]
+            ) as bruto:
+                conteudo = bruto.read()
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Falha ao abrir ZIP da B3: {exc}"
+        ) from exc
 
     texto = conteudo.decode(
         "latin-1",
@@ -196,7 +295,9 @@ def parse_arquivo(
         )
 
         if cotacao is not None:
-            registros.append(cotacao)
+            registros.append(
+                cotacao
+            )
 
     return registros, lidos
 
@@ -241,11 +342,23 @@ def gravar_cotacoes(
                 coletado_em
             )
             values (
-                %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
                 now()
             )
-            on conflict (ativo_id, data, fonte)
+            on conflict (
+                ativo_id,
+                data,
+                fonte
+            )
             do update set
                 abertura = excluded.abertura,
                 maxima = excluded.maxima,
@@ -265,19 +378,46 @@ def coletar_anual(
     conn,
     ano: int,
 ) -> tuple[int, int]:
-    universo = carregar_universo(conn)
+    universo = carregar_universo(
+        conn
+    )
 
     if not universo:
         raise RuntimeError(
             "Universo de Ações/FIIs está vazio."
         )
 
-    zip_bytes = baixar_anual(ano)
-    linhas = extrair_txt(zip_bytes)
+    print(
+        f"Universo carregado: "
+        f"{len(universo)} ativos."
+    )
+
+    zip_bytes = baixar_anual(
+        ano
+    )
+
+    linhas = extrair_txt(
+        zip_bytes
+    )
+
+    print(
+        f"Linhas extraídas do arquivo: "
+        f"{len(linhas)}"
+    )
 
     registros, lidos = parse_arquivo(
         linhas,
         universo,
+    )
+
+    print(
+        f"Registros de mercado lidos: "
+        f"{lidos}"
+    )
+
+    print(
+        f"Registros pertencentes ao universo: "
+        f"{len(registros)}"
     )
 
     gravados = gravar_cotacoes(
@@ -292,15 +432,27 @@ def coletar_diario(
     conn,
     data_ref: date,
 ) -> tuple[int, int]:
-    universo = carregar_universo(conn)
+    universo = carregar_universo(
+        conn
+    )
 
     if not universo:
         raise RuntimeError(
             "Universo de Ações/FIIs está vazio."
         )
 
-    zip_bytes = baixar_diario(data_ref)
-    linhas = extrair_txt(zip_bytes)
+    print(
+        f"Universo carregado: "
+        f"{len(universo)} ativos."
+    )
+
+    zip_bytes = baixar_diario(
+        data_ref
+    )
+
+    linhas = extrair_txt(
+        zip_bytes
+    )
 
     registros, lidos = parse_arquivo(
         linhas,
