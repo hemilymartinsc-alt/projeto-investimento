@@ -1,10 +1,15 @@
-name: B3 - Cotações Diárias
+name: B3 - Cotações
 
 on:
   workflow_dispatch:
     inputs:
       data:
         description: "Data opcional no formato AAAA-MM-DD"
+        required: false
+        type: string
+
+      ano:
+        description: "Ano opcional para backfill completo, ex.: 2025"
         required: false
         type: string
 
@@ -23,7 +28,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Baixar repositório
@@ -42,8 +47,11 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATA_MANUAL: ${{ inputs.data }}
+          ANO_MANUAL: ${{ inputs.ano }}
         run: |
-          if [ -n "$DATA_MANUAL" ]; then
+          if [ -n "$ANO_MANUAL" ]; then
+            python -m src.jobs.coletar_cotacoes --ano "$ANO_MANUAL"
+          elif [ -n "$DATA_MANUAL" ]; then
             python -m src.jobs.coletar_cotacoes --data "$DATA_MANUAL"
           else
             python -m src.jobs.coletar_cotacoes
