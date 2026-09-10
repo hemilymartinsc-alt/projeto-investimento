@@ -178,7 +178,15 @@ bp_base as (
 
         max(d.valor) filter (
             where d.tipo_demonstracao = 'BPP'
-              and d.codigo_conta = '2.03'
+              and d.codigo_conta in (
+                  '2.03',
+                  '2.07',
+                  '2.07.01',
+                  '2.08',
+                  '2.08.01',
+                  '2.09',
+                  '2.09.01'
+              )
               and (
                   lower(d.descricao_conta)
                       like '%patrimônio líquido%'
@@ -186,11 +194,49 @@ bp_base as (
                   lower(d.descricao_conta)
                       like '%patrimonio liquido%'
               )
-        ) as pl_padrao,
+              and (
+                  lower(d.descricao_conta)
+                      like '%atribuído ao controlador%'
+                  or
+                  lower(d.descricao_conta)
+                      like '%atribuido ao controlador%'
+                  or
+                  lower(d.descricao_conta)
+                      like '%acionistas controladores%'
+              )
+        ) as pl_controlador,
 
         max(d.valor) filter (
             where d.tipo_demonstracao = 'BPP'
-              and d.codigo_conta = '2.07'
+              and d.codigo_conta in (
+                  '2.03',
+                  '2.07',
+                  '2.07.01',
+                  '2.08',
+                  '2.08.01',
+                  '2.09',
+                  '2.09.01'
+              )
+              and (
+                  lower(d.descricao_conta)
+                      like '%patrimônio líquido consolidado%'
+                  or
+                  lower(d.descricao_conta)
+                      like '%patrimonio liquido consolidado%'
+              )
+        ) as pl_consolidado,
+
+        max(d.valor) filter (
+            where d.tipo_demonstracao = 'BPP'
+              and d.codigo_conta in (
+                  '2.03',
+                  '2.07',
+                  '2.07.01',
+                  '2.08',
+                  '2.08.01',
+                  '2.09',
+                  '2.09.01'
+              )
               and (
                   lower(d.descricao_conta)
                       like '%patrimônio líquido%'
@@ -198,24 +244,11 @@ bp_base as (
                   lower(d.descricao_conta)
                       like '%patrimonio liquido%'
               )
-        ) as pl_financeiro_total,
-
-        max(d.valor) filter (
-            where d.tipo_demonstracao = 'BPP'
-              and d.codigo_conta = '2.07.01'
-              and (
-                  (
-                      lower(d.descricao_conta)
-                          like '%patrimônio líquido%'
-                      or
-                      lower(d.descricao_conta)
-                          like '%patrimonio liquido%'
-                  )
-                  and
-                  lower(d.descricao_conta)
-                      like '%controlador%'
-              )
-        ) as pl_financeiro_controlador,
+              and lower(d.descricao_conta)
+                  not like '%não controlador%'
+              and lower(d.descricao_conta)
+                  not like '%nao controlador%'
+        ) as pl_generico,
 
         max(d.valor) filter (
             where d.tipo_demonstracao = 'BPA'
@@ -290,7 +323,11 @@ bp_base as (
                   '2.02.01',
                   '2.03',
                   '2.07',
-                  '2.07.01'
+                  '2.07.01',
+                  '2.08',
+                  '2.08.01',
+                  '2.09',
+                  '2.09.01'
               )
           )
       )
@@ -307,37 +344,11 @@ bp_raw as (
         b.data_referencia,
         b.fonte,
 
-        case
-            when (
-                lower(
-                    coalesce(
-                        s.classificacao_setorial,
-                        ''
-                    )
-                )
-                like 'financeiro / intermediários financeiros /%'
-
-                or
-                lower(
-                    coalesce(
-                        s.classificacao_setorial,
-                        ''
-                    )
-                )
-                like 'financeiro / intermediarios financeiros /%'
-            )
-            then coalesce(
-                b.pl_financeiro_controlador,
-                b.pl_financeiro_total,
-                b.pl_padrao
-            )
-
-            else coalesce(
-                b.pl_padrao,
-                b.pl_financeiro_controlador,
-                b.pl_financeiro_total
-            )
-        end as patrimonio_liquido,
+        coalesce(
+            b.pl_controlador,
+            b.pl_consolidado,
+            b.pl_generico
+        ) as patrimonio_liquido,
 
         b.ativo_circulante,
         b.passivo_circulante,
