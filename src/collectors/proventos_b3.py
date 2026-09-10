@@ -7,7 +7,7 @@ import time
 import unicodedata
 from bisect import bisect_right
 from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import quote
 
 import requests
@@ -33,6 +33,11 @@ RETRIES = 5
 TIMEOUT = (20, 90)
 REQUEST_DELAY = 0.12
 INSERT_BATCH_SIZE = 2000
+
+# A coluna investimento.proventos.valor_por_unidade
+# é NUMERIC(18,8). Normalizamos antes da deduplicação
+# para que Python e PostgreSQL usem a mesma precisão.
+VALOR_ESCALA = Decimal("0.00000001")
 
 
 class B3ApiError(RuntimeError):
@@ -122,16 +127,8 @@ def parse_decimal(
     if not texto:
         return None
 
-    if (
-        ","
-        in texto
-        and "."
-        in texto
-    ):
-        if (
-            texto.rfind(",")
-            > texto.rfind(".")
-        ):
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
             texto = texto.replace(
                 ".",
                 "",
@@ -155,8 +152,13 @@ def parse_decimal(
         )
 
     try:
-        return Decimal(
+        numero = Decimal(
             texto
+        )
+
+        return numero.quantize(
+            VALOR_ESCALA,
+            rounding=ROUND_HALF_UP,
         )
 
     except InvalidOperation:
@@ -303,29 +305,14 @@ def garantir_fonte(
             )
             on conflict (codigo)
             do update set
-                nome =
-                    excluded.nome,
-
-                tipo =
-                    excluded.tipo,
-
-                oficial =
-                    true,
-
-                url_base =
-                    excluded.url_base,
-
-                periodicidade =
-                    excluded.periodicidade,
-
-                finalidade =
-                    excluded.finalidade,
-
-                ativa =
-                    true,
-
-                atualizado_em =
-                    now()
+                nome = excluded.nome,
+                tipo = excluded.tipo,
+                oficial = true,
+                url_base = excluded.url_base,
+                periodicidade = excluded.periodicidade,
+                finalidade = excluded.finalidade,
+                ativa = true,
+                atualizado_em = now()
             """,
             (
                 SOURCE_CODE,
@@ -357,10 +344,8 @@ def carregar_universo(
                     investimento.vw_acoes_validacao_oficial_atual
                 where
                     elegivel_analise = true
-                    and upper(ticker)
-                        = upper(%s)
-                    and codigo_cvm
-                        is not null
+                    and upper(ticker) = upper(%s)
+                    and codigo_cvm is not null
                 limit 1
                 """,
                 (
@@ -378,10 +363,8 @@ def carregar_universo(
                 )
             )
 
-        codigo_alvo = (
-            normalizar_codigo_cvm(
-                row[0]
-            )
+        codigo_alvo = normalizar_codigo_cvm(
+            row[0]
         )
 
     with conn.cursor() as cur:
@@ -397,8 +380,7 @@ def carregar_universo(
                     investimento.vw_acoes_validacao_oficial_atual
                 where
                     elegivel_analise = true
-                    and codigo_cvm
-                        is not null
+                    and codigo_cvm is not null
                     and ltrim(
                         codigo_cvm,
                         '0'
@@ -423,8 +405,7 @@ def carregar_universo(
                     investimento.vw_acoes_validacao_oficial_atual
                 where
                     elegivel_analise = true
-                    and codigo_cvm
-                        is not null
+                    and codigo_cvm is not null
                 order by
                     codigo_cvm,
                     ticker
@@ -444,11 +425,8 @@ def carregar_universo(
         subclasse,
         codigo_cvm,
     ) in rows:
-
-        codigo = (
-            normalizar_codigo_cvm(
-                codigo_cvm
-            )
+        codigo = normalizar_codigo_cvm(
+            codigo_cvm
         )
 
         universo.setdefault(
@@ -608,11 +586,9 @@ def obter_catalogo_empresas(
             ):
                 continue
 
-            codigo = (
-                normalizar_codigo_cvm(
-                    item.get(
-                        "codeCVM"
-                    )
+            codigo = normalizar_codigo_cvm(
+                item.get(
+                    "codeCVM"
                 )
             )
 
@@ -794,11 +770,9 @@ def normalizar_tipo(
     if (
         "JRS CAP PROPRIO"
         in texto
-
         or
         "JUROS SOBRE CAPITAL"
         in texto
-
         or
         texto == "JCP"
     ):
@@ -994,8 +968,7 @@ def normalizar_empresa(
 
         if (
             data_com is None
-            or data_com
-            < DATA_INICIAL
+            or data_com < DATA_INICIAL
         ):
             stats[
                 "ignorados_data"
@@ -1019,11 +992,9 @@ def normalizar_empresa(
 
             continue
 
-        classe = (
-            normalizar_classe(
-                item.get(
-                    "typeStock"
-                )
+        classe = normalizar_classe(
+            item.get(
+                "typeStock"
             )
         )
 
@@ -1034,11 +1005,9 @@ def normalizar_empresa(
 
             continue
 
-        destino = (
-            ativos_para_classe(
-                ativos,
-                classe,
-            )
+        destino = ativos_para_classe(
+            ativos,
+            classe,
         )
 
         if not destino:
@@ -1048,27 +1017,23 @@ def normalizar_empresa(
 
             continue
 
-        data_pagamento = (
-            parse_data(
-                item.get(
-                    "paymentDate"
-                )
-                or
-                item.get(
-                    "datePayment"
-                )
-                or
-                item.get(
-                    "paymentDateTime"
-                )
+        data_pagamento = parse_data(
+            item.get(
+                "paymentDate"
+            )
+            or
+            item.get(
+                "datePayment"
+            )
+            or
+            item.get(
+                "paymentDateTime"
             )
         )
 
-        data_ex = (
-            proximo_pregao(
-                data_com,
-                calendario,
-            )
+        data_ex = proximo_pregao(
+            data_com,
+            calendario,
         )
 
         if data_ex is None:
@@ -1165,9 +1130,7 @@ def dividir_em_lotes(
 ):
     for inicio in range(
         0,
-        len(
-            registros
-        ),
+        len(registros),
         tamanho,
     ):
         yield registros[
@@ -1205,8 +1168,7 @@ def gravar(
                     investimento.proventos
                 where
                     fonte = %s
-                    and ativo_id
-                        = any(%s)
+                    and ativo_id = any(%s)
                 """,
                 (
                     SOURCE_CODE,
@@ -1306,19 +1268,15 @@ def coletar(
         ticker=ticker,
     )
 
-    calendario = (
-        carregar_calendario_pregoes(
-            conn
-        )
+    calendario = carregar_calendario_pregoes(
+        conn
     )
 
     session = criar_session()
 
     try:
-        catalogo = (
-            obter_catalogo_empresas(
-                session
-            )
+        catalogo = obter_catalogo_empresas(
+            session
         )
 
         codigos = sorted(
@@ -1327,10 +1285,8 @@ def coletar(
 
         sem_catalogo = [
             codigo
-            for codigo
-            in codigos
-            if codigo
-            not in catalogo
+            for codigo in codigos
+            if codigo not in catalogo
         ]
 
         if (
@@ -1348,16 +1304,10 @@ def coletar(
         if not ticker:
             cobertura = (
                 (
-                    len(
-                        codigos
-                    )
-                    - len(
-                        sem_catalogo
-                    )
+                    len(codigos)
+                    - len(sem_catalogo)
                 )
-                / len(
-                    codigos
-                )
+                / len(codigos)
             )
 
             if cobertura < 0.90:
@@ -1373,17 +1323,13 @@ def coletar(
 
         totais = {
             "empresas_universo":
-                len(
-                    codigos
-                ),
+                len(codigos),
 
             "empresas_resolvidas":
                 0,
 
             "empresas_sem_catalogo":
-                len(
-                    sem_catalogo
-                ),
+                len(sem_catalogo),
 
             "lidos":
                 0,
@@ -1415,10 +1361,8 @@ def coletar(
             codigos,
             start=1,
         ):
-            empresa = (
-                catalogo.get(
-                    codigo
-                )
+            empresa = catalogo.get(
+                codigo
             )
 
             if not empresa:
@@ -1437,13 +1381,11 @@ def coletar(
                 )
             )
 
-            itens = (
-                obter_proventos_empresa(
-                    session,
-                    empresa[
-                        "trading_name"
-                    ],
-                )
+            itens = obter_proventos_empresa(
+                session,
+                empresa[
+                    "trading_name"
+                ],
             )
 
             (
@@ -1494,12 +1436,8 @@ def coletar(
         totais[
             "duplicados_removidos"
         ] = (
-            len(
-                todos
-            )
-            - len(
-                finais
-            )
+            len(todos)
+            - len(finais)
         )
 
         return totais
