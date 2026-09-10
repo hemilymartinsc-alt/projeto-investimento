@@ -1,0 +1,50 @@
+name: B3 - Proventos
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticker:
+        description: "Ticker opcional para teste, ex.: PETR4. Deixe vazio para coletar todas as ações."
+        required: false
+        type: string
+
+  schedule:
+    # 22:30 de Brasília, de segunda a sexta-feira.
+    # Em UTC, a execução ocorre no início do dia seguinte.
+    - cron: "30 1 * * 2-6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proventos-b3
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Coletar proventos B3
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TICKER_MANUAL: ${{ inputs.ticker }}
+        run: |
+          if [ -n "$TICKER_MANUAL" ]; then
+            python -m src.jobs.coletar_proventos --ticker "$TICKER_MANUAL"
+          else
+            python -m src.jobs.coletar_proventos
+          fi
