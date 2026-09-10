@@ -5,6 +5,7 @@ import json
 import re
 import time
 import unicodedata
+from bisect import bisect_right
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
@@ -21,44 +22,25 @@ API_BASE = (
     "listedCompaniesProxy/CompanyCall"
 )
 
-URL_EMPRESAS = (
-    f"{API_BASE}/GetInitialCompanies"
-)
+URL_EMPRESAS = f"{API_BASE}/GetInitialCompanies"
+URL_PROVENTOS = f"{API_BASE}/GetListedCashDividends"
 
-URL_PROVENTOS = (
-    f"{API_BASE}/GetListedCashDividends"
-)
-
-DATA_INICIAL = date(
-    2019,
-    1,
-    1,
-)
+DATA_INICIAL = date(2019, 1, 1)
 
 PAGE_SIZE = 120
 MAX_PAGES = 100
 RETRIES = 5
-
-TIMEOUT = (
-    20,
-    90,
-)
-
+TIMEOUT = (20, 90)
 REQUEST_DELAY = 0.12
+INSERT_BATCH_SIZE = 2000
 
 
-class B3ApiError(
-    RuntimeError
-):
+class B3ApiError(RuntimeError):
     pass
 
 
-def normalizar_texto(
-    valor,
-) -> str:
-    texto = str(
-        valor or ""
-    ).strip()
+def normalizar_texto(valor) -> str:
+    texto = str(valor or "").strip()
 
     texto = unicodedata.normalize(
         "NFKD",
@@ -82,27 +64,19 @@ def normalizar_texto(
     return texto.upper().strip()
 
 
-def normalizar_codigo_cvm(
-    valor,
-) -> str:
+def normalizar_codigo_cvm(valor) -> str:
     texto = re.sub(
         r"\D",
         "",
-        str(
-            valor or ""
-        ),
+        str(valor or ""),
     )
 
-    texto = texto.lstrip(
-        "0"
-    )
+    texto = texto.lstrip("0")
 
     return texto or "0"
 
 
-def parse_data(
-    valor,
-) -> date | None:
+def parse_data(valor) -> date | None:
     texto = str(
         valor or ""
     ).strip()
@@ -111,24 +85,12 @@ def parse_data(
         return None
 
     formatos = (
-        (
-            "%d/%m/%Y",
-            10,
-        ),
-        (
-            "%Y-%m-%d",
-            10,
-        ),
-        (
-            "%Y-%m-%dT%H:%M:%S",
-            19,
-        ),
+        ("%d/%m/%Y", 10),
+        ("%Y-%m-%d", 10),
+        ("%Y-%m-%dT%H:%M:%S", 19),
     )
 
-    for (
-        formato,
-        tamanho,
-    ) in formatos:
+    for formato, tamanho in formatos:
         try:
             return datetime.strptime(
                 texto[:tamanho],
@@ -145,9 +107,7 @@ def parse_decimal(
     valor,
 ) -> Decimal | None:
     texto = (
-        str(
-            valor or ""
-        )
+        str(valor or "")
         .strip()
         .replace(
             "R$",
@@ -521,6 +481,59 @@ def carregar_universo(
     return universo
 
 
+def carregar_calendario_pregoes(
+    conn,
+) -> list[date]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select distinct
+                data
+            from
+                investimento.cotacoes_diarias
+            where
+                data >= %s
+                and fonte = 'B3_HIST'
+            order by
+                data
+            """,
+            (
+                DATA_INICIAL,
+            ),
+        )
+
+        calendario = [
+            row[0]
+            for row in cur.fetchall()
+        ]
+
+    if not calendario:
+        raise RuntimeError(
+            "Calendário de pregões B3 vazio."
+        )
+
+    return calendario
+
+
+def proximo_pregao(
+    data_com: date,
+    calendario: list[date],
+) -> date | None:
+    posicao = bisect_right(
+        calendario,
+        data_com,
+    )
+
+    if posicao >= len(
+        calendario
+    ):
+        return None
+
+    return calendario[
+        posicao
+    ]
+
+
 def total_paginas(
     dados: dict,
 ) -> int | None:
@@ -781,9 +794,11 @@ def normalizar_tipo(
     if (
         "JRS CAP PROPRIO"
         in texto
+
         or
         "JUROS SOBRE CAPITAL"
         in texto
+
         or
         texto == "JCP"
     ):
@@ -920,6 +935,7 @@ def normalizar_empresa(
     codigo_cvm: str,
     ativos: list[dict],
     itens: list[dict],
+    calendario: list[date],
 ) -> tuple[
     list[dict],
     dict,
@@ -942,6 +958,9 @@ def normalizar_empresa(
             0,
 
         "ignorados_classe":
+            0,
+
+        "sem_data_ex":
             0,
     }
 
@@ -1045,6 +1064,18 @@ def normalizar_empresa(
             )
         )
 
+        data_ex = (
+            proximo_pregao(
+                data_com,
+                calendario,
+            )
+        )
+
+        if data_ex is None:
+            stats[
+                "sem_data_ex"
+            ] += 1
+
         for ativo in destino:
             registros.append(
                 {
@@ -1066,6 +1097,9 @@ def normalizar_empresa(
 
                     "data_com":
                         data_com,
+
+                    "data_ex":
+                        data_ex,
 
                     "data_pagamento":
                         data_pagamento,
@@ -1094,15 +1128,23 @@ def deduplicar(
             registro[
                 "ativo_id"
             ],
+
             registro[
                 "tipo"
             ],
+
             registro[
                 "data_com"
             ],
+
+            registro[
+                "data_ex"
+            ],
+
             registro[
                 "data_pagamento"
             ],
+
             registro[
                 "valor_por_unidade"
             ],
@@ -1115,6 +1157,23 @@ def deduplicar(
     return list(
         unicos.values()
     )
+
+
+def dividir_em_lotes(
+    registros: list[dict],
+    tamanho: int,
+):
+    for inicio in range(
+        0,
+        len(
+            registros
+        ),
+        tamanho,
+    ):
+        yield registros[
+            inicio:
+            inicio + tamanho
+        ]
 
 
 def gravar(
@@ -1168,7 +1227,10 @@ def gravar(
                 ),
             )
 
-        if registros:
+        for lote in dividir_em_lotes(
+            registros,
+            INSERT_BATCH_SIZE,
+        ):
             cur.executemany(
                 """
                 insert into
@@ -1188,7 +1250,7 @@ def gravar(
                     %s,
                     %s,
                     %s,
-                    null,
+                    %s,
                     %s,
                     %s,
                     'CONFIRMADO',
@@ -1202,53 +1264,32 @@ def gravar(
                         registro[
                             "ativo_id"
                         ],
+
                         registro[
                             "tipo"
                         ],
+
                         registro[
                             "data_com"
                         ],
+
+                        registro[
+                            "data_ex"
+                        ],
+
                         registro[
                             "data_pagamento"
                         ],
+
                         registro[
                             "valor_por_unidade"
                         ],
+
                         SOURCE_CODE,
                     )
                     for registro
-                    in registros
+                    in lote
                 ],
-            )
-
-        if ativos_alvo:
-            cur.execute(
-                """
-                update
-                    investimento.proventos p
-                set
-                    data_ex = (
-                        select
-                            min(c.data)
-                        from
-                            investimento.cotacoes_diarias c
-                        where
-                            c.data
-                                > p.data_com
-                    )
-                where
-                    p.fonte = %s
-                    and p.ativo_id
-                        = any(%s)
-                    and p.data_com
-                        is not null
-                    and p.data_ex
-                        is null
-                """,
-                (
-                    SOURCE_CODE,
-                    ativos_alvo,
-                ),
             )
 
     return len(
@@ -1263,6 +1304,12 @@ def coletar(
     universo = carregar_universo(
         conn,
         ticker=ticker,
+    )
+
+    calendario = (
+        carregar_calendario_pregoes(
+            conn
+        )
     )
 
     session = criar_session()
@@ -1352,6 +1399,9 @@ def coletar(
 
             "ignorados_classe":
                 0,
+
+            "sem_data_ex":
+                0,
         }
 
         todos: list[
@@ -1405,6 +1455,7 @@ def coletar(
                     codigo
                 ],
                 itens,
+                calendario,
             )
 
             todos.extend(
@@ -1417,6 +1468,7 @@ def coletar(
                 "ignorados_data",
                 "ignorados_valor",
                 "ignorados_classe",
+                "sem_data_ex",
             ):
                 totais[
                     chave
