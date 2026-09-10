@@ -70,6 +70,48 @@ dre_base as (
             where d.codigo_conta = '3.09'
         ) as lucro_309,
 
+        max(d.valor) filter (
+            where d.codigo_conta = '3.05'
+              and (
+                  lower(d.descricao_conta)
+                      like '%resultado antes do resultado financeiro%'
+                  or lower(d.descricao_conta)
+                      like '%resultado operacional%'
+              )
+        ) as ebit_305,
+
+        max(d.valor) filter (
+            where d.codigo_conta = '3.07'
+              and lower(d.descricao_conta)
+                  like '%resultado antes do resultado financeiro%'
+        ) as ebit_307,
+
+        max(d.valor) filter (
+            where d.codigo_conta = '3.07'
+              and (
+                  lower(d.descricao_conta)
+                      like '%resultado antes dos tributos sobre o lucro%'
+                  or lower(d.descricao_conta)
+                      like '%resultado antes tributação%'
+                  or lower(d.descricao_conta)
+                      like '%resultado antes tributacao%'
+              )
+        ) as resultado_antes_tributos,
+
+        max(d.valor) filter (
+            where d.codigo_conta = '3.08'
+              and (
+                  lower(d.descricao_conta)
+                      like '%imposto de renda e contribuição social%'
+                  or lower(d.descricao_conta)
+                      like '%imposto de renda e contribuicao social%'
+                  or lower(d.descricao_conta)
+                      like '%provisão para ir e contribuição social%'
+                  or lower(d.descricao_conta)
+                      like '%provisao para ir e contribuicao social%'
+              )
+        ) as imposto_renda_cs,
+
         max(d.descricao_conta) filter (
             where d.codigo_conta = '3.09'
         ) as lucro_309_descricao
@@ -83,6 +125,9 @@ dre_base as (
       and d.tipo_demonstracao = 'DRE'
       and d.codigo_conta in (
           '3.01',
+          '3.05',
+          '3.07',
+          '3.08',
           '3.09',
           '3.11'
       )
@@ -115,8 +160,7 @@ dre_raw as (
                 )
                 like 'financeiro / intermediários financeiros /%'
 
-                or
-                lower(
+                or lower(
                     coalesce(
                         s.classificacao_setorial,
                         ''
@@ -124,8 +168,7 @@ dre_raw as (
                 )
                 like 'financeiro / intermediarios financeiros /%'
 
-                or
-                lower(
+                or lower(
                     coalesce(
                         d.receita_descricao,
                         ''
@@ -136,13 +179,20 @@ dre_raw as (
             then d.lucro_309
 
             else null
-        end as lucro
+        end as lucro,
+
+        coalesce(
+            d.ebit_305,
+            d.ebit_307
+        ) as ebit,
+
+        d.resultado_antes_tributos,
+        d.imposto_renda_cs
 
     from dre_base d
 
     left join setores s
-      on s.codigo_cvm
-         = d.codigo_cvm
+      on s.codigo_cvm = d.codigo_cvm
 ),
 
 dre_atual as (
@@ -155,9 +205,75 @@ dre_atual as (
         fonte,
         receita,
         receita_descricao,
-        lucro
+        lucro,
+        ebit,
+        resultado_antes_tributos,
+        imposto_renda_cs
 
     from dre_raw
+
+    order by
+        codigo_cvm,
+        data_referencia,
+
+        case
+            when fonte = 'CVM_DFP'
+                then 0
+            else 1
+        end
+),
+
+dva_base as (
+    select
+        d.codigo_cvm,
+        d.data_referencia,
+        d.fonte,
+
+        abs(
+            max(d.valor) filter (
+                where d.codigo_conta = '7.04.01'
+                  and (
+                      lower(d.descricao_conta)
+                          like '%depreciação%'
+                      or lower(d.descricao_conta)
+                          like '%depreciacao%'
+                  )
+                  and (
+                      lower(d.descricao_conta)
+                          like '%amortização%'
+                      or lower(d.descricao_conta)
+                          like '%amortizacao%'
+                  )
+            )
+        ) as depreciacao_amortizacao
+
+    from investimento.demonstracoes_financeiras d
+
+    where d.fonte in (
+        'CVM_DFP',
+        'CVM_ITR'
+    )
+      and d.tipo_demonstracao = 'DVA'
+      and d.codigo_conta = '7.04.01'
+      and d.codigo_cvm is not null
+
+    group by
+        d.codigo_cvm,
+        d.data_referencia,
+        d.fonte
+),
+
+dva_atual as (
+    select distinct on (
+        codigo_cvm,
+        data_referencia
+    )
+        codigo_cvm,
+        data_referencia,
+        fonte,
+        depreciacao_amortizacao
+
+    from dva_base
 
     order by
         codigo_cvm,
@@ -190,18 +306,15 @@ bp_base as (
               and (
                   lower(d.descricao_conta)
                       like '%patrimônio líquido%'
-                  or
-                  lower(d.descricao_conta)
+                  or lower(d.descricao_conta)
                       like '%patrimonio liquido%'
               )
               and (
                   lower(d.descricao_conta)
                       like '%atribuído ao controlador%'
-                  or
-                  lower(d.descricao_conta)
+                  or lower(d.descricao_conta)
                       like '%atribuido ao controlador%'
-                  or
-                  lower(d.descricao_conta)
+                  or lower(d.descricao_conta)
                       like '%acionistas controladores%'
               )
         ) as pl_controlador,
@@ -220,8 +333,7 @@ bp_base as (
               and (
                   lower(d.descricao_conta)
                       like '%patrimônio líquido consolidado%'
-                  or
-                  lower(d.descricao_conta)
+                  or lower(d.descricao_conta)
                       like '%patrimonio liquido consolidado%'
               )
         ) as pl_consolidado,
@@ -240,8 +352,7 @@ bp_base as (
               and (
                   lower(d.descricao_conta)
                       like '%patrimônio líquido%'
-                  or
-                  lower(d.descricao_conta)
+                  or lower(d.descricao_conta)
                       like '%patrimonio liquido%'
               )
               and lower(d.descricao_conta)
@@ -277,8 +388,7 @@ bp_base as (
               and (
                   lower(d.descricao_conta)
                       like '%empréstim%'
-                  or
-                  lower(d.descricao_conta)
+                  or lower(d.descricao_conta)
                       like '%emprestim%'
               )
               and lower(d.descricao_conta)
@@ -291,8 +401,7 @@ bp_base as (
               and (
                   lower(d.descricao_conta)
                       like '%empréstim%'
-                  or
-                  lower(d.descricao_conta)
+                  or lower(d.descricao_conta)
                       like '%emprestim%'
               )
               and lower(d.descricao_conta)
@@ -354,13 +463,28 @@ bp_raw as (
         b.passivo_circulante,
         b.caixa,
         b.divida_curto,
-        b.divida_longo
+        b.divida_longo,
+
+        case
+            when b.caixa is not null
+              and (
+                  b.divida_curto is not null
+                  or b.divida_longo is not null
+              )
+                then
+                    coalesce(
+                        b.divida_curto,
+                        0
+                    )
+                    + coalesce(
+                        b.divida_longo,
+                        0
+                    )
+                    - b.caixa
+            else null
+        end as divida_liquida_raw
 
     from bp_base b
-
-    left join setores s
-      on s.codigo_cvm
-         = b.codigo_cvm
 ),
 
 bp_atual as (
@@ -395,6 +519,13 @@ refs as (
         codigo_cvm,
         data_referencia
     from bp_atual
+
+    union
+
+    select
+        codigo_cvm,
+        data_referencia
+    from dva_atual
 ),
 
 base as (
@@ -411,8 +542,7 @@ base as (
             )
             like 'financeiro / intermediários financeiros /%'
 
-            or
-            lower(
+            or lower(
                 coalesce(
                     s.classificacao_setorial,
                     ''
@@ -420,8 +550,7 @@ base as (
             )
             like 'financeiro / intermediarios financeiros /%'
 
-            or
-            lower(
+            or lower(
                 coalesce(
                     s.classificacao_setorial,
                     ''
@@ -429,8 +558,7 @@ base as (
             )
             like 'financeiro / previdência e seguros /%'
 
-            or
-            lower(
+            or lower(
                 coalesce(
                     s.classificacao_setorial,
                     ''
@@ -438,8 +566,7 @@ base as (
             )
             like 'financeiro / previdencia e seguros /%'
 
-            or
-            lower(
+            or lower(
                 coalesce(
                     d.receita_descricao,
                     ''
@@ -447,8 +574,7 @@ base as (
             )
             like '%intermedia%financeir%'
 
-            or
-            lower(
+            or lower(
                 coalesce(
                     d.receita_descricao,
                     ''
@@ -456,8 +582,7 @@ base as (
             )
             like '%opera%segur%'
 
-            or
-            lower(
+            or lower(
                 coalesce(
                     d.receita_descricao,
                     ''
@@ -465,8 +590,7 @@ base as (
             )
             like '%prêmio%'
 
-            or
-            lower(
+            or lower(
                 coalesce(
                     d.receita_descricao,
                     ''
@@ -475,74 +599,70 @@ base as (
             like '%premio%'
         ) as estrutura_financeira,
 
-        d.fonte
-            as dre_fonte,
-
-        d.receita
-            as receita_atual,
-
+        d.fonte as dre_fonte,
+        d.receita as receita_atual,
         d.receita_descricao,
+        d.lucro as lucro_atual,
+        d.ebit as ebit_atual,
+        d.resultado_antes_tributos as pretax_atual,
+        d.imposto_renda_cs as imposto_atual,
 
-        d.lucro
-            as lucro_atual,
+        v.fonte as dva_fonte,
+        v.depreciacao_amortizacao as da_atual,
 
         b.patrimonio_liquido,
         b.ativo_circulante,
         b.passivo_circulante,
-        b.caixa,
-        b.divida_curto,
-        b.divida_longo,
+        b.divida_liquida_raw,
 
-        anual.receita
-            as receita_anual,
+        anual.receita as receita_anual,
+        anual.lucro as lucro_anual,
+        anual.ebit as ebit_anual,
+        anual.resultado_antes_tributos as pretax_anual,
+        anual.imposto_renda_cs as imposto_anual,
 
-        anual.lucro
-            as lucro_anual,
+        anterior.receita as receita_ano_anterior,
+        anterior.lucro as lucro_ano_anterior,
+        anterior.ebit as ebit_ano_anterior,
+        anterior.resultado_antes_tributos as pretax_ano_anterior,
+        anterior.imposto_renda_cs as imposto_ano_anterior,
 
-        anterior.receita
-            as receita_ano_anterior,
+        dva_anual.depreciacao_amortizacao as da_anual,
+        dva_anterior.depreciacao_amortizacao as da_ano_anterior,
 
-        anterior.lucro
-            as lucro_ano_anterior,
-
-        pl_anterior.patrimonio_liquido
-            as patrimonio_liquido_ano_anterior
+        bp_anterior.patrimonio_liquido as patrimonio_liquido_ano_anterior,
+        bp_anterior.divida_liquida_raw as divida_liquida_ano_anterior
 
     from refs r
 
     left join setores s
-      on s.codigo_cvm
-         = r.codigo_cvm
+      on s.codigo_cvm = r.codigo_cvm
 
     left join dre_atual d
-      on d.codigo_cvm
-         = r.codigo_cvm
+      on d.codigo_cvm = r.codigo_cvm
+     and d.data_referencia = r.data_referencia
 
-     and d.data_referencia
-         = r.data_referencia
+    left join dva_atual v
+      on v.codigo_cvm = r.codigo_cvm
+     and v.data_referencia = r.data_referencia
 
     left join bp_atual b
-      on b.codigo_cvm
-         = r.codigo_cvm
-
-     and b.data_referencia
-         = r.data_referencia
+      on b.codigo_cvm = r.codigo_cvm
+     and b.data_referencia = r.data_referencia
 
     left join lateral (
         select
             x.receita,
-            x.lucro
+            x.lucro,
+            x.ebit,
+            x.resultado_antes_tributos,
+            x.imposto_renda_cs
 
         from dre_raw x
 
-        where x.codigo_cvm
-              = r.codigo_cvm
-
-          and x.fonte
-              = 'CVM_DFP'
-
-          and x.data_referencia
-              < r.data_referencia
+        where x.codigo_cvm = r.codigo_cvm
+          and x.fonte = 'CVM_DFP'
+          and x.data_referencia < r.data_referencia
 
         order by
             x.data_referencia desc
@@ -553,16 +673,15 @@ base as (
     left join lateral (
         select
             x.receita,
-            x.lucro
+            x.lucro,
+            x.ebit,
+            x.resultado_antes_tributos,
+            x.imposto_renda_cs
 
         from dre_raw x
 
-        where x.codigo_cvm
-              = r.codigo_cvm
-
-          and x.fonte
-              = 'CVM_ITR'
-
+        where x.codigo_cvm = r.codigo_cvm
+          and x.fonte = 'CVM_ITR'
           and x.data_referencia between
               (
                   (
@@ -595,16 +714,66 @@ base as (
 
     left join lateral (
         select
-            x.patrimonio_liquido
+            x.depreciacao_amortizacao
+
+        from dva_base x
+
+        where x.codigo_cvm = r.codigo_cvm
+          and x.fonte = 'CVM_DFP'
+          and x.data_referencia < r.data_referencia
+
+        order by
+            x.data_referencia desc
+
+        limit 1
+    ) dva_anual on true
+
+    left join lateral (
+        select
+            x.depreciacao_amortizacao
+
+        from dva_base x
+
+        where x.codigo_cvm = r.codigo_cvm
+          and x.fonte = 'CVM_ITR'
+          and x.data_referencia between
+              (
+                  (
+                      r.data_referencia
+                      - interval '1 year'
+                  )::date
+                  - 10
+              )
+              and
+              (
+                  (
+                      r.data_referencia
+                      - interval '1 year'
+                  )::date
+                  + 10
+              )
+
+        order by
+            abs(
+                x.data_referencia
+                - (
+                    r.data_referencia
+                    - interval '1 year'
+                )::date
+            ),
+            x.data_referencia desc
+
+        limit 1
+    ) dva_anterior on true
+
+    left join lateral (
+        select
+            x.patrimonio_liquido,
+            x.divida_liquida_raw
 
         from bp_raw x
 
-        where x.codigo_cvm
-              = r.codigo_cvm
-
-          and x.patrimonio_liquido
-              is not null
-
+        where x.codigo_cvm = r.codigo_cvm
           and x.data_referencia between
               (
                   (
@@ -638,7 +807,7 @@ base as (
             end
 
         limit 1
-    ) pl_anterior on true
+    ) bp_anterior on true
 ),
 
 ttm as (
@@ -650,10 +819,8 @@ ttm as (
                 then receita_atual
 
             when dre_fonte = 'CVM_ITR'
-              and receita_anual
-                  is not null
-              and receita_ano_anterior
-                  is not null
+              and receita_anual is not null
+              and receita_ano_anterior is not null
                 then
                     receita_anual
                     + receita_atual
@@ -667,19 +834,117 @@ ttm as (
                 then lucro_atual
 
             when dre_fonte = 'CVM_ITR'
-              and lucro_anual
-                  is not null
-              and lucro_ano_anterior
-                  is not null
+              and lucro_anual is not null
+              and lucro_ano_anterior is not null
                 then
                     lucro_anual
                     + lucro_atual
                     - lucro_ano_anterior
 
             else null
-        end as lucro_liquido_ttm
+        end as lucro_liquido_ttm,
+
+        case
+            when dre_fonte = 'CVM_DFP'
+                then ebit_atual
+
+            when dre_fonte = 'CVM_ITR'
+              and ebit_anual is not null
+              and ebit_ano_anterior is not null
+                then
+                    ebit_anual
+                    + ebit_atual
+                    - ebit_ano_anterior
+
+            else null
+        end as ebit_ttm,
+
+        case
+            when dre_fonte = 'CVM_DFP'
+                then pretax_atual
+
+            when dre_fonte = 'CVM_ITR'
+              and pretax_anual is not null
+              and pretax_ano_anterior is not null
+                then
+                    pretax_anual
+                    + pretax_atual
+                    - pretax_ano_anterior
+
+            else null
+        end as pretax_ttm,
+
+        case
+            when dre_fonte = 'CVM_DFP'
+                then imposto_atual
+
+            when dre_fonte = 'CVM_ITR'
+              and imposto_anual is not null
+              and imposto_ano_anterior is not null
+                then
+                    imposto_anual
+                    + imposto_atual
+                    - imposto_ano_anterior
+
+            else null
+        end as imposto_ttm,
+
+        case
+            when dva_fonte = 'CVM_DFP'
+                then da_atual
+
+            when dva_fonte = 'CVM_ITR'
+              and da_anual is not null
+              and da_ano_anterior is not null
+                then
+                    da_anual
+                    + da_atual
+                    - da_ano_anterior
+
+            else null
+        end as depreciacao_amortizacao_ttm
 
     from base
+),
+
+metricas_base as (
+    select
+        *,
+
+        case
+            when estrutura_financeira
+                then null
+
+            when ebit_ttm is not null
+              and depreciacao_amortizacao_ttm is not null
+                then
+                    ebit_ttm
+                    + depreciacao_amortizacao_ttm
+
+            else null
+        end as ebitda_ttm,
+
+        case
+            when estrutura_financeira
+                then null
+
+            when pretax_ttm > 0
+              and imposto_ttm < 0
+              and (
+                  -imposto_ttm
+                  / nullif(
+                      pretax_ttm,
+                      0
+                  )
+              ) between 0 and 0.50
+                then
+                    -imposto_ttm
+                    / pretax_ttm
+
+            else 0.34::numeric
+        end as taxa_imposto_roic
+
+    from ttm
 ),
 
 empresa as (
@@ -693,33 +958,58 @@ empresa as (
         case
             when estrutura_financeira
                 then null
+            else divida_liquida_raw
+        end as divida_liquida,
 
-            when caixa is not null
+        case
+            when estrutura_financeira
+                then null
+
+            when ebit_ttm > 0
+              and patrimonio_liquido is not null
+              and patrimonio_liquido_ano_anterior is not null
+              and divida_liquida_raw is not null
+              and divida_liquida_ano_anterior is not null
               and (
-                  divida_curto
-                      is not null
-                  or divida_longo
-                      is not null
-              )
+                  patrimonio_liquido
+                  + divida_liquida_raw
+              ) > 0
+              and (
+                  patrimonio_liquido_ano_anterior
+                  + divida_liquida_ano_anterior
+              ) > 0
                 then
-                    coalesce(
-                        divida_curto,
+                    (
+                        ebit_ttm
+                        * (
+                            1
+                            - taxa_imposto_roic
+                        )
+                    )
+                    /
+                    nullif(
+                        (
+                            (
+                                patrimonio_liquido
+                                + divida_liquida_raw
+                            )
+                            +
+                            (
+                                patrimonio_liquido_ano_anterior
+                                + divida_liquida_ano_anterior
+                            )
+                        )
+                        / 2,
                         0
                     )
-                    + coalesce(
-                        divida_longo,
-                        0
-                    )
-                    - caixa
 
             else null
-        end as divida_liquida,
+        end as roic,
 
         case
             when patrimonio_liquido > 0
               and patrimonio_liquido_ano_anterior > 0
-              and lucro_liquido_ttm
-                  is not null
+              and lucro_liquido_ttm is not null
                 then
                     lucro_liquido_ttm
                     / nullif(
@@ -738,11 +1028,9 @@ empresa as (
             when estrutura_financeira
                 then null
 
-            when receita_ttm
-                    is not null
+            when receita_ttm is not null
               and receita_ttm <> 0
-              and lucro_liquido_ttm
-                    is not null
+              and lucro_liquido_ttm is not null
                 then
                     lucro_liquido_ttm
                     / receita_ttm
@@ -754,17 +1042,42 @@ empresa as (
             when estrutura_financeira
                 then null
 
-            when ativo_circulante
-                    is not null
+            when receita_ttm > 0
+              and ebitda_ttm is not null
+                then
+                    ebitda_ttm
+                    / receita_ttm
+
+            else null
+        end as margem_ebitda,
+
+        case
+            when estrutura_financeira
+                then null
+
+            when ativo_circulante is not null
               and passivo_circulante > 0
                 then
                     ativo_circulante
                     / passivo_circulante
 
             else null
-        end as liquidez_corrente
+        end as liquidez_corrente,
 
-    from ttm
+        case
+            when estrutura_financeira
+                then null
+
+            when divida_liquida_raw is not null
+              and ebitda_ttm > 0
+                then
+                    divida_liquida_raw
+                    / ebitda_ttm
+
+            else null
+        end as divida_liquida_ebitda
+
+    from metricas_base
 ),
 
 linhas as (
@@ -776,42 +1089,28 @@ linhas as (
         e.patrimonio_liquido,
         e.divida_liquida,
         e.roe,
+        e.roic,
         e.margem_liquida,
-        e.liquidez_corrente
+        e.margem_ebitda,
+        e.liquidez_corrente,
+        e.divida_liquida_ebitda
 
     from empresa e
 
     join acoes a
-      on a.codigo_cvm
-         = e.codigo_cvm
+      on a.codigo_cvm = e.codigo_cvm
 
     where
-        e.receita_ttm
-            is not null
-
-        or
-        e.lucro_liquido_ttm
-            is not null
-
-        or
-        e.patrimonio_liquido
-            is not null
-
-        or
-        e.divida_liquida
-            is not null
-
-        or
-        e.roe
-            is not null
-
-        or
-        e.margem_liquida
-            is not null
-
-        or
-        e.liquidez_corrente
-            is not null
+        e.receita_ttm is not null
+        or e.lucro_liquido_ttm is not null
+        or e.patrimonio_liquido is not null
+        or e.divida_liquida is not null
+        or e.roe is not null
+        or e.roic is not null
+        or e.margem_liquida is not null
+        or e.margem_ebitda is not null
+        or e.liquidez_corrente is not null
+        or e.divida_liquida_ebitda is not null
 ),
 
 upserted as (
@@ -823,8 +1122,11 @@ upserted as (
         patrimonio_liquido,
         divida_liquida,
         roe,
+        roic,
         margem_liquida,
+        margem_ebitda,
         liquidez_corrente,
+        divida_liquida_ebitda,
         fonte_base,
         calculado_em
     )
@@ -837,8 +1139,11 @@ upserted as (
         patrimonio_liquido,
         divida_liquida,
         roe,
+        roic,
         margem_liquida,
+        margem_ebitda,
         liquidez_corrente,
+        divida_liquida_ebitda,
         'CVM_DFP_ITR',
         now()
 
@@ -849,46 +1154,28 @@ upserted as (
         data_referencia
     )
     do update set
-        receita_ttm =
-            excluded.receita_ttm,
-
-        lucro_liquido_ttm =
-            excluded.lucro_liquido_ttm,
-
-        patrimonio_liquido =
-            excluded.patrimonio_liquido,
-
-        divida_liquida =
-            excluded.divida_liquida,
-
-        roe =
-            excluded.roe,
-
-        margem_liquida =
-            excluded.margem_liquida,
-
-        liquidez_corrente =
-            excluded.liquidez_corrente,
-
-        fonte_base =
-            excluded.fonte_base,
-
-        calculado_em =
-            now()
+        receita_ttm = excluded.receita_ttm,
+        lucro_liquido_ttm = excluded.lucro_liquido_ttm,
+        patrimonio_liquido = excluded.patrimonio_liquido,
+        divida_liquida = excluded.divida_liquida,
+        roe = excluded.roe,
+        roic = excluded.roic,
+        margem_liquida = excluded.margem_liquida,
+        margem_ebitda = excluded.margem_ebitda,
+        liquidez_corrente = excluded.liquidez_corrente,
+        divida_liquida_ebitda = excluded.divida_liquida_ebitda,
+        fonte_base = excluded.fonte_base,
+        calculado_em = now()
 
     returning 1
 )
 
-select
-    count(*)
-
+select count(*)
 from upserted
 """
 
 
-def criar_log(
-    conn,
-) -> int:
+def criar_log(conn) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -914,9 +1201,7 @@ def criar_log(
 
     conn.commit()
 
-    return int(
-        log_id
-    )
+    return int(log_id)
 
 
 def finalizar_log(
@@ -950,14 +1235,11 @@ def finalizar_log(
     conn.commit()
 
 
-def contar_demonstracoes(
-    conn,
-) -> int:
+def contar_demonstracoes(conn) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
-            select
-                count(*)
+            select count(*)
             from investimento.demonstracoes_financeiras
             where fonte in (
                 'CVM_DFP',
@@ -968,81 +1250,66 @@ def contar_demonstracoes(
 
         total = cur.fetchone()[0]
 
-    return int(
-        total or 0
-    )
+    return int(total or 0)
 
 
-def calcular_fundamentos(
-    conn,
-) -> int:
+def calcular_fundamentos(conn) -> int:
     with conn.cursor() as cur:
-        cur.execute(
-            CALCULAR_SQL
-        )
-
+        cur.execute(CALCULAR_SQL)
         gravados = cur.fetchone()[0]
 
-    return int(
-        gravados or 0
-    )
+    return int(gravados or 0)
 
 
-def validar_resultado(
-    conn,
-) -> dict:
+def validar_resultado(conn) -> dict:
     with conn.cursor() as cur:
         cur.execute(
             """
             select
                 count(*) as snapshots,
-
-                count(
-                    distinct ativo_id
-                ) as ativos,
-
-                min(
-                    data_referencia
-                ) as primeira_data,
-
-                max(
-                    data_referencia
-                ) as ultima_data,
+                count(distinct ativo_id) as ativos,
+                min(data_referencia) as primeira_data,
+                max(data_referencia) as ultima_data,
 
                 count(*) filter (
-                    where receita_ttm
-                        is not null
+                    where receita_ttm is not null
                 ) as com_receita,
 
                 count(*) filter (
-                    where lucro_liquido_ttm
-                        is not null
+                    where lucro_liquido_ttm is not null
                 ) as com_lucro,
 
                 count(*) filter (
-                    where patrimonio_liquido
-                        is not null
+                    where patrimonio_liquido is not null
                 ) as com_pl,
 
                 count(*) filter (
-                    where roe
-                        is not null
+                    where roe is not null
                 ) as com_roe,
 
                 count(*) filter (
-                    where margem_liquida
-                        is not null
-                ) as com_margem,
+                    where roic is not null
+                ) as com_roic,
 
                 count(*) filter (
-                    where liquidez_corrente
-                        is not null
+                    where margem_liquida is not null
+                ) as com_margem_liquida,
+
+                count(*) filter (
+                    where margem_ebitda is not null
+                ) as com_margem_ebitda,
+
+                count(*) filter (
+                    where liquidez_corrente is not null
                 ) as com_liquidez,
 
                 count(*) filter (
-                    where divida_liquida
-                        is not null
-                ) as com_divida
+                    where divida_liquida is not null
+                ) as com_divida,
+
+                count(*) filter (
+                    where divida_liquida_ebitda is not null
+                ) as com_divida_ebitda
 
             from investimento.fundamentos_snapshot
 
@@ -1056,47 +1323,20 @@ def validar_resultado(
         row = cur.fetchone()
 
     return {
-        "snapshots": int(
-            row[0] or 0
-        ),
-
-        "ativos": int(
-            row[1] or 0
-        ),
-
-        "primeira_data":
-            row[2],
-
-        "ultima_data":
-            row[3],
-
-        "com_receita": int(
-            row[4] or 0
-        ),
-
-        "com_lucro": int(
-            row[5] or 0
-        ),
-
-        "com_pl": int(
-            row[6] or 0
-        ),
-
-        "com_roe": int(
-            row[7] or 0
-        ),
-
-        "com_margem": int(
-            row[8] or 0
-        ),
-
-        "com_liquidez": int(
-            row[9] or 0
-        ),
-
-        "com_divida": int(
-            row[10] or 0
-        ),
+        "snapshots": int(row[0] or 0),
+        "ativos": int(row[1] or 0),
+        "primeira_data": row[2],
+        "ultima_data": row[3],
+        "com_receita": int(row[4] or 0),
+        "com_lucro": int(row[5] or 0),
+        "com_pl": int(row[6] or 0),
+        "com_roe": int(row[7] or 0),
+        "com_roic": int(row[8] or 0),
+        "com_margem_liquida": int(row[9] or 0),
+        "com_margem_ebitda": int(row[10] or 0),
+        "com_liquidez": int(row[11] or 0),
+        "com_divida": int(row[12] or 0),
+        "com_divida_ebitda": int(row[13] or 0),
     }
 
 
@@ -1105,34 +1345,25 @@ def main() -> int:
     log_id = None
 
     try:
-        log_id = criar_log(
-            conn
-        )
+        log_id = criar_log(conn)
 
-        lidos = contar_demonstracoes(
-            conn
-        )
-
-        gravados = calcular_fundamentos(
-            conn
-        )
+        lidos = contar_demonstracoes(conn)
+        gravados = calcular_fundamentos(conn)
 
         conn.commit()
 
-        resumo = validar_resultado(
-            conn
-        )
+        resumo = validar_resultado(conn)
 
         mensagem = (
-            "Fundamentos calculados a partir "
-            "de DFP/ITR CVM; "
+            "Fundamentos calculados a partir de DFP/ITR CVM; "
             f"demonstracoes_lidas={lidos}; "
             f"linhas_atualizadas={gravados}; "
             f"snapshots={resumo['snapshots']}; "
             f"ativos={resumo['ativos']}; "
-            f"periodo="
-            f"{resumo['primeira_data']}.."
-            f"{resumo['ultima_data']}."
+            f"roic={resumo['com_roic']}; "
+            f"margem_ebitda={resumo['com_margem_ebitda']}; "
+            f"divida_liq_ebitda={resumo['com_divida_ebitda']}; "
+            f"periodo={resumo['primeira_data']}..{resumo['ultima_data']}."
         )
 
         finalizar_log(
@@ -1144,94 +1375,37 @@ def main() -> int:
             mensagem=mensagem,
         )
 
+        print("Fundamentos: SUCESSO")
+        print(f"Demonstracoes lidas: {lidos}")
+        print(f"Linhas atualizadas: {gravados}")
+        print(f"Snapshots no banco: {resumo['snapshots']}")
+        print(f"Ativos cobertos: {resumo['ativos']}")
         print(
-            "Fundamentos: SUCESSO"
+            "Periodo: "
+            f"{resumo['primeira_data']} a "
+            f"{resumo['ultima_data']}"
         )
-
+        print(f"Receita TTM: {resumo['com_receita']}")
+        print(f"Lucro TTM: {resumo['com_lucro']}")
+        print(f"Patrimonio liquido: {resumo['com_pl']}")
+        print(f"ROE: {resumo['com_roe']}")
+        print(f"ROIC: {resumo['com_roic']}")
         print(
-            (
-                "Demonstracoes lidas: "
-                f"{lidos}"
-            )
+            "Margem liquida: "
+            f"{resumo['com_margem_liquida']}"
         )
-
         print(
-            (
-                "Linhas atualizadas: "
-                f"{gravados}"
-            )
+            "Margem EBITDA: "
+            f"{resumo['com_margem_ebitda']}"
         )
-
         print(
-            (
-                "Snapshots no banco: "
-                f"{resumo['snapshots']}"
-            )
+            "Liquidez corrente: "
+            f"{resumo['com_liquidez']}"
         )
-
+        print(f"Divida liquida: {resumo['com_divida']}")
         print(
-            (
-                "Ativos cobertos: "
-                f"{resumo['ativos']}"
-            )
-        )
-
-        print(
-            (
-                "Periodo: "
-                f"{resumo['primeira_data']} "
-                "a "
-                f"{resumo['ultima_data']}"
-            )
-        )
-
-        print(
-            (
-                "Receita TTM: "
-                f"{resumo['com_receita']}"
-            )
-        )
-
-        print(
-            (
-                "Lucro TTM: "
-                f"{resumo['com_lucro']}"
-            )
-        )
-
-        print(
-            (
-                "Patrimonio liquido: "
-                f"{resumo['com_pl']}"
-            )
-        )
-
-        print(
-            (
-                "ROE: "
-                f"{resumo['com_roe']}"
-            )
-        )
-
-        print(
-            (
-                "Margem liquida: "
-                f"{resumo['com_margem']}"
-            )
-        )
-
-        print(
-            (
-                "Liquidez corrente: "
-                f"{resumo['com_liquidez']}"
-            )
-        )
-
-        print(
-            (
-                "Divida liquida: "
-                f"{resumo['com_divida']}"
-            )
+            "Divida liquida/EBITDA: "
+            f"{resumo['com_divida_ebitda']}"
         )
 
         return 0
@@ -1247,18 +1421,13 @@ def main() -> int:
                     status="ERRO",
                     lidos=None,
                     gravados=0,
-                    mensagem=str(
-                        exc
-                    ),
+                    mensagem=str(exc),
                 )
             except Exception:
                 pass
 
         print(
-            (
-                "Fundamentos: erro | "
-                f"{exc}"
-            ),
+            f"Fundamentos: erro | {exc}",
             file=sys.stderr,
         )
 
@@ -1269,6 +1438,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(
-        main()
-    )
+    raise SystemExit(main())
