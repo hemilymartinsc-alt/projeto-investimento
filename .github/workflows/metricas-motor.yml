@@ -1,0 +1,41 @@
+name: Motor - Métricas
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # Segunda-feira às 11:00 no horário de Brasília.
+    # O CVM roda antes e os fundamentos são calculados
+    # às 10:00, deixando uma hora de intervalo.
+    - cron: "0 14 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metricas-motor-v1
+  cancel-in-progress: false
+
+jobs:
+  calcular:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Calcular métricas do motor
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python -m src.jobs.calcular_metricas_motor
