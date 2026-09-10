@@ -20,13 +20,11 @@ SOURCE_LOG_CODE = "CVM_CAPITAL"
 URLS = {
     "DFP": (
         "https://dados.cvm.gov.br/dados/"
-        "CIA_ABERTA/DOC/DFP/DADOS/"
-        "dfp_cia_aberta_{ano}.zip"
+        "CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_{ano}.zip"
     ),
     "ITR": (
         "https://dados.cvm.gov.br/dados/"
-        "CIA_ABERTA/DOC/ITR/DADOS/"
-        "itr_cia_aberta_{ano}.zip"
+        "CIA_ABERTA/DOC/ITR/DADOS/itr_cia_aberta_{ano}.zip"
     ),
 }
 
@@ -35,277 +33,122 @@ FONTES = {
     "ITR": "CVM_ITR_CAPITAL",
 }
 
-B3_API_BASE = (
-    "https://sistemaswebb3-listados.b3.com.br/"
-    "listedCompaniesProxy/CompanyCall"
-)
-
 B3_SUPPLEMENT_URL = (
-    f"{B3_API_BASE}/GetListedSupplementCompany"
+    "https://sistemaswebb3-listados.b3.com.br/"
+    "listedCompaniesProxy/CompanyCall/GetListedSupplementCompany"
 )
 
-TIMEOUT = (
-    30,
-    300,
-)
-
-B3_TIMEOUT = (
-    20,
-    90,
-)
-
-RETRIES = 5
+CVM_TIMEOUT = (30, 300)
+B3_TIMEOUT = (15, 45)
+CVM_RETRIES = 5
+B3_RETRIES = 2
 REQUEST_DELAY = 0.12
 INSERT_BATCH_SIZE = 1000
 
-FATORES_ESCALA = (
-    1,
-    1000,
-    1_000_000,
-)
-
-LIMITE_VALIDACAO_B3 = Decimal(
-    "0.25"
-)
+FATORES_ESCALA = (1, 1000, 1_000_000)
+LIMITE_VALIDACAO_B3 = Decimal("0.25")
 
 
-class CVMCapitalError(
-    RuntimeError
-):
+class CVMCapitalError(RuntimeError):
     pass
 
 
-def normalizar_codigo_cvm(
-    valor,
-) -> str:
-    texto = re.sub(
-        r"\D",
-        "",
-        str(
-            valor or ""
-        ),
-    ).lstrip(
-        "0"
-    )
-
+def normalizar_codigo_cvm(valor) -> str:
+    texto = re.sub(r"\D", "", str(valor or "")).lstrip("0")
     return texto or "0"
 
 
-def normalizar_cnpj(
-    valor,
-) -> str | None:
-    texto = re.sub(
-        r"\D",
-        "",
-        str(
-            valor or ""
-        ),
-    )
-
+def normalizar_cnpj(valor) -> str | None:
+    texto = re.sub(r"\D", "", str(valor or ""))
     return texto or None
 
 
-def parse_data(
-    valor,
-) -> date | None:
-    texto = str(
-        valor or ""
-    ).strip()
-
+def parse_data(valor) -> date | None:
+    texto = str(valor or "").strip()
     if not texto:
         return None
 
-    for formato in (
-        "%Y-%m-%d",
-        "%d/%m/%Y",
-    ):
+    for formato in ("%Y-%m-%d", "%d/%m/%Y"):
         try:
-            return datetime.strptime(
-                texto[:10],
-                formato,
-            ).date()
-
+            return datetime.strptime(texto[:10], formato).date()
         except ValueError:
             continue
 
     return None
 
 
-def parse_inteiro(
-    valor,
-) -> int | None:
-    texto = str(
-        valor or ""
-    ).strip().replace(
-        " ",
-        "",
-    )
-
+def parse_inteiro(valor) -> int | None:
+    texto = str(valor or "").strip().replace(" ", "")
     if not texto:
         return None
 
-    if (
-        ","
-        in texto
-        and "."
-        in texto
-    ):
-        if (
-            texto.rfind(",")
-            > texto.rfind(".")
-        ):
-            texto = (
-                texto
-                .replace(
-                    ".",
-                    "",
-                )
-                .replace(
-                    ",",
-                    ".",
-                )
-            )
-
+    if "," in texto and "." in texto:
+        if texto.rfind(",") > texto.rfind("."):
+            texto = texto.replace(".", "").replace(",", ".")
         else:
-            texto = texto.replace(
-                ",",
-                "",
-            )
-
+            texto = texto.replace(",", "")
     elif "," in texto:
-        texto = texto.replace(
-            ",",
-            ".",
-        )
-
-    elif re.fullmatch(
-        r"-?\d{1,3}(\.\d{3})+",
-        texto,
-    ):
-        texto = texto.replace(
-            ".",
-            "",
-        )
+        texto = texto.replace(",", ".")
+    elif re.fullmatch(r"-?\d{1,3}(\.\d{3})+", texto):
+        texto = texto.replace(".", "")
 
     try:
-        numero = Decimal(
-            texto
-        )
-
+        numero = Decimal(texto)
     except InvalidOperation:
         return None
 
-    if (
-        numero
-        != numero.to_integral_value()
-    ):
+    if numero != numero.to_integral_value():
         return None
 
-    return int(
-        numero
-    )
+    return int(numero)
 
 
 def calcular_circulacao(
     integralizado: int | None,
     tesouraria: int | None,
 ) -> int | None:
-
-    if (
-        integralizado is None
-        or tesouraria is None
-    ):
+    if integralizado is None or tesouraria is None:
         return None
 
-    resultado = (
-        integralizado
-        - tesouraria
-    )
-
-    if resultado < 0:
-        return None
-
-    return resultado
+    resultado = integralizado - tesouraria
+    return resultado if resultado >= 0 else None
 
 
-def multiplicar(
-    valor: int | None,
-    fator: int,
-) -> int | None:
-
-    if valor is None:
-        return None
-
-    return valor * fator
+def multiplicar(valor: int | None, fator: int) -> int | None:
+    return None if valor is None else valor * fator
 
 
-def codificar_payload_b3(
-    payload: dict,
-) -> str:
-
+def codificar_payload_b3(payload: dict) -> str:
     bruto = json.dumps(
         payload,
         ensure_ascii=False,
-        separators=(
-            ",",
-            ":",
-        ),
-    ).encode(
-        "utf-8"
-    )
+        separators=(",", ":"),
+    ).encode("utf-8")
 
-    token = base64.b64encode(
-        bruto
-    ).decode(
-        "ascii"
-    )
-
-    return quote(
-        token,
-        safe="",
-    )
+    token = base64.b64encode(bruto).decode("ascii")
+    return quote(token, safe="")
 
 
 def criar_session_b3() -> requests.Session:
-
     session = requests.Session()
-
     session.headers.update(
         {
             "User-Agent": (
                 "Mozilla/5.0 "
-                "(compatible; "
-                "projeto-investimento/1.0; "
-                "dados-publicos)"
+                "(compatible; projeto-investimento/1.0; dados-publicos)"
             ),
-            "Accept": (
-                "application/json, "
-                "text/plain, "
-                "*/*"
-            ),
-            "Accept-Language": (
-                "pt-BR,pt;q=0.9,"
-                "en;q=0.8"
-            ),
-            "Referer":
-                "https://www.b3.com.br/",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+            "Referer": "https://www.b3.com.br/",
         }
     )
-
     return session
 
 
-def requisitar_b3(
-    session: requests.Session,
-    codigo_emissor: str,
-) -> dict:
-
+def requisitar_b3(session: requests.Session, codigo_emissor: str):
     payload = {
-        "issuingCompany":
-            codigo_emissor,
-
-        "language":
-            "pt-br",
+        "issuingCompany": codigo_emissor,
+        "language": "pt-br",
     }
 
     url = (
@@ -315,64 +158,41 @@ def requisitar_b3(
 
     ultimo_erro = None
 
-    for tentativa in range(
-        1,
-        RETRIES + 1,
-    ):
+    for tentativa in range(1, B3_RETRIES + 1):
         try:
-
-            resposta = session.get(
-                url,
-                timeout=B3_TIMEOUT,
-            )
-
+            resposta = session.get(url, timeout=B3_TIMEOUT)
             resposta.raise_for_status()
-
             dados = resposta.json()
 
-            if not isinstance(
-                dados,
-                dict,
-            ):
+            # O endpoint GetListedSupplementCompany retorna uma LISTA
+            # JSON na raiz. Mantemos dict também por tolerância.
+            if not isinstance(dados, (list, dict)):
                 raise CVMCapitalError(
                     (
-                        "Resposta B3 inválida "
-                        f"para {codigo_emissor}."
+                        "Formato JSON inesperado da B3 "
+                        f"para {codigo_emissor}: "
+                        f"{type(dados).__name__}."
                     )
                 )
 
-            time.sleep(
-                REQUEST_DELAY
-            )
-
+            time.sleep(REQUEST_DELAY)
             return dados
 
         except Exception as exc:
-
             ultimo_erro = exc
-
-            if tentativa < RETRIES:
-                time.sleep(
-                    tentativa * 2
-                )
+            if tentativa < B3_RETRIES:
+                time.sleep(tentativa * 2)
 
     raise CVMCapitalError(
         (
             "Falha ao consultar a B3 "
-            f"para {codigo_emissor}: "
-            f"{ultimo_erro}"
+            f"para {codigo_emissor}: {ultimo_erro}"
         )
     )
 
 
-def localizar_info_b3(
-    objeto,
-) -> dict | None:
-
-    if isinstance(
-        objeto,
-        dict,
-    ):
+def localizar_info_b3(objeto) -> dict | None:
+    if isinstance(objeto, dict):
         if any(
             chave in objeto
             for chave in (
@@ -384,28 +204,13 @@ def localizar_info_b3(
             return objeto
 
         for valor in objeto.values():
-
-            encontrado = (
-                localizar_info_b3(
-                    valor
-                )
-            )
-
+            encontrado = localizar_info_b3(valor)
             if encontrado is not None:
                 return encontrado
 
-    elif isinstance(
-        objeto,
-        list,
-    ):
+    elif isinstance(objeto, list):
         for item in objeto:
-
-            encontrado = (
-                localizar_info_b3(
-                    item
-                )
-            )
-
+            encontrado = localizar_info_b3(item)
             if encontrado is not None:
                 return encontrado
 
@@ -416,208 +221,112 @@ def obter_acoes_b3(
     session: requests.Session,
     codigo_emissor: str | None,
 ) -> dict | None:
-
     if not codigo_emissor:
         return None
 
-    dados = requisitar_b3(
-        session,
-        codigo_emissor,
-    )
-
-    info = localizar_info_b3(
-        dados
-    )
+    dados = requisitar_b3(session, codigo_emissor)
+    info = localizar_info_b3(dados)
 
     if info is None:
         return None
 
-    ordinarias = parse_inteiro(
-        info.get(
-            "numberCommonShares"
-        )
-    )
+    ordinarias = parse_inteiro(info.get("numberCommonShares"))
+    preferenciais = parse_inteiro(info.get("numberPreferredShares"))
+    total = parse_inteiro(info.get("totalNumberShares"))
 
-    preferenciais = parse_inteiro(
-        info.get(
-            "numberPreferredShares"
-        )
-    )
-
-    total = parse_inteiro(
-        info.get(
-            "totalNumberShares"
-        )
-    )
-
-    if (
-        total is None
-        and (
-            ordinarias is not None
-            or preferenciais is not None
-        )
+    if total is None and (
+        ordinarias is not None or preferenciais is not None
     ):
-        total = (
-            (ordinarias or 0)
-            + (preferenciais or 0)
-        )
+        total = (ordinarias or 0) + (preferenciais or 0)
 
-    if (
-        total is None
-        or total <= 0
-    ):
+    if total is None or total <= 0:
         return None
 
     return {
-        "ordinarias":
-            ordinarias,
-
-        "preferenciais":
-            preferenciais,
-
-        "total":
-            total,
+        "ordinarias": ordinarias,
+        "preferenciais": preferenciais,
+        "total": total,
     }
 
 
 def escolher_fator_escala(
     total_cvm: int | None,
     total_b3: int | None,
-) -> tuple[
-    int,
-    Decimal | None,
-    bool,
-]:
-
+) -> tuple[int, Decimal | None, bool]:
     if (
         total_cvm is None
         or total_cvm <= 0
         or total_b3 is None
         or total_b3 <= 0
     ):
-        return (
-            1,
-            None,
-            False,
-        )
+        return 1, None, False
 
     melhor_fator = 1
     melhor_erro = None
 
     for fator in FATORES_ESCALA:
-
-        normalizado = (
-            Decimal(
-                total_cvm
-            )
-            * Decimal(
-                fator
-            )
-        )
-
+        normalizado = Decimal(total_cvm) * Decimal(fator)
         erro = (
-            abs(
-                normalizado
-                - Decimal(
-                    total_b3
-                )
-            )
-            / Decimal(
-                total_b3
-            )
+            abs(normalizado - Decimal(total_b3))
+            / Decimal(total_b3)
         )
 
-        if (
-            melhor_erro is None
-            or erro < melhor_erro
-        ):
+        if melhor_erro is None or erro < melhor_erro:
             melhor_fator = fator
             melhor_erro = erro
 
     validado = bool(
         melhor_erro is not None
-        and melhor_erro
-        <= LIMITE_VALIDACAO_B3
+        and melhor_erro <= LIMITE_VALIDACAO_B3
     )
 
-    return (
-        melhor_fator,
-        melhor_erro,
-        validado,
-    )
+    return melhor_fator, melhor_erro, validado
 
 
-def garantir_fontes(
-    conn,
-) -> None:
-
+def garantir_fontes(conn) -> None:
     registros = [
         (
             "CVM_DFP_CAPITAL",
+            "CVM - DFP Composição do Capital",
+            "https://dados.cvm.gov.br/dataset/cia_aberta-doc-dfp",
             (
-                "CVM - DFP "
-                "Composição do Capital"
-            ),
-            (
-                "https://dados.cvm.gov.br/"
-                "dataset/cia_aberta-doc-dfp"
-            ),
-            (
-                "Quantidade de ações "
-                "integralizadas, em tesouraria "
-                "e em circulação informada "
-                "nas DFP."
+                "Quantidade de ações integralizadas, em tesouraria "
+                "e em circulação informada nas DFP."
             ),
         ),
         (
             "CVM_ITR_CAPITAL",
+            "CVM - ITR Composição do Capital",
+            "https://dados.cvm.gov.br/dataset/cia_aberta-doc-itr",
             (
-                "CVM - ITR "
-                "Composição do Capital"
-            ),
-            (
-                "https://dados.cvm.gov.br/"
-                "dataset/cia_aberta-doc-itr"
-            ),
-            (
-                "Quantidade de ações "
-                "integralizadas, em tesouraria "
-                "e em circulação informada "
-                "nas ITR."
+                "Quantidade de ações integralizadas, em tesouraria "
+                "e em circulação informada nas ITR."
             ),
         ),
         (
             "CVM_CAPITAL",
-            (
-                "CVM - Composição do Capital "
-                "DFP e ITR"
-            ),
+            "CVM - Composição do Capital DFP e ITR",
             "https://dados.cvm.gov.br/",
             (
-                "Processo consolidado de "
-                "coleta da composição do "
-                "capital das companhias "
-                "abertas."
+                "Processo consolidado de coleta da composição "
+                "do capital das companhias abertas."
             ),
         ),
     ]
 
     with conn.cursor() as cur:
-
         cur.executemany(
             """
-            insert into
-                investimento.fontes_dados (
-                    codigo,
-                    nome,
-                    tipo,
-                    oficial,
-                    url_base,
-                    periodicidade,
-                    finalidade,
-                    ativa
-                )
-
+            insert into investimento.fontes_dados (
+                codigo,
+                nome,
+                tipo,
+                oficial,
+                url_base,
+                periodicidade,
+                finalidade,
+                ativa
+            )
             values (
                 %s,
                 %s,
@@ -628,269 +337,143 @@ def garantir_fontes(
                 %s,
                 true
             )
-
             on conflict (codigo)
             do update set
-
-                nome =
-                    excluded.nome,
-
-                tipo =
-                    excluded.tipo,
-
-                oficial =
-                    true,
-
-                url_base =
-                    excluded.url_base,
-
-                periodicidade =
-                    excluded.periodicidade,
-
-                finalidade =
-                    excluded.finalidade,
-
-                ativa =
-                    true,
-
-                atualizado_em =
-                    now()
+                nome = excluded.nome,
+                tipo = excluded.tipo,
+                oficial = true,
+                url_base = excluded.url_base,
+                periodicidade = excluded.periodicidade,
+                finalidade = excluded.finalidade,
+                ativa = true,
+                atualizado_em = now()
             """,
             registros,
         )
 
 
-def carregar_universo(
-    conn,
-) -> dict[
-    str,
-    dict,
-]:
-
+def carregar_universo(conn) -> dict[str, dict]:
     with conn.cursor() as cur:
-
         cur.execute(
             """
             select distinct
-
                 v.codigo_cvm,
-
                 coalesce(
                     v.cnpj_cvm_formatado,
                     v.cnpj_b3
                 ) as cnpj,
-
                 b.codigo_emissor
-
-            from
-                investimento
-                .vw_acoes_validacao_oficial_atual v
-
-            left join
-                investimento.b3_empresas_listadas b
-
-              on ltrim(
-                    b.codigo_cvm,
-                    '0'
-                 )
-                 =
-                 ltrim(
-                    v.codigo_cvm,
-                    '0'
-                 )
-
-            where
-                v.elegivel_analise = true
-
-                and v.codigo_cvm
-                    is not null
-
-                and coalesce(
+            from investimento.vw_acoes_validacao_oficial_atual v
+            left join investimento.b3_empresas_listadas b
+              on ltrim(b.codigo_cvm, '0')
+                 = ltrim(v.codigo_cvm, '0')
+            where v.elegivel_analise = true
+              and v.codigo_cvm is not null
+              and coalesce(
                     v.cnpj_cvm_formatado,
                     v.cnpj_b3
-                ) is not null
+                  ) is not null
             """
         )
-
         rows = cur.fetchall()
 
-    universo = {}
+    universo: dict[str, dict] = {}
 
-    for (
-        codigo_cvm,
-        cnpj,
-        codigo_emissor,
-    ) in rows:
-
-        cnpj_normalizado = (
-            normalizar_cnpj(
-                cnpj
-            )
-        )
-
+    for codigo_cvm, cnpj, codigo_emissor in rows:
+        cnpj_normalizado = normalizar_cnpj(cnpj)
         if not cnpj_normalizado:
             continue
 
-        universo[
-            cnpj_normalizado
-        ] = {
-            "codigo_cvm":
-                normalizar_codigo_cvm(
-                    codigo_cvm
-                ),
-
-            "cnpj":
-                cnpj_normalizado,
-
-            "codigo_emissor":
-                (
-                    str(
-                        codigo_emissor
-                    ).strip()
-
-                    if codigo_emissor
-                    else None
-                ),
+        universo[cnpj_normalizado] = {
+            "codigo_cvm": normalizar_codigo_cvm(codigo_cvm),
+            "cnpj": cnpj_normalizado,
+            "codigo_emissor": (
+                str(codigo_emissor).strip()
+                if codigo_emissor
+                else None
+            ),
         }
 
     if not universo:
         raise RuntimeError(
-            (
-                "Universo CVM sem CNPJs "
-                "para composição do capital."
-            )
+            "Universo CVM sem CNPJs para composição do capital."
         )
 
     return universo
 
 
-def baixar_zip(
-    documento: str,
-    ano: int,
-) -> bytes:
-
-    url = URLS[
-        documento
-    ].format(
-        ano=ano,
-    )
+def baixar_zip(documento: str, ano: int) -> bytes:
+    url = URLS[documento].format(ano=ano)
 
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 "
-            "projeto-investimento/1.0 "
-            "(coleta automatizada de "
-            "dados publicos CVM)"
+            "Mozilla/5.0 projeto-investimento/1.0 "
+            "(coleta automatizada de dados publicos CVM)"
         ),
-        "Accept":
-            "*/*",
+        "Accept": "*/*",
     }
 
     ultimo_erro = None
 
-    for tentativa in range(
-        1,
-        RETRIES + 1,
-    ):
+    for tentativa in range(1, CVM_RETRIES + 1):
         try:
-
             print(
                 (
-                    f"Baixando {documento} "
-                    f"{ano} - tentativa "
-                    f"{tentativa}/{RETRIES}..."
-                )
+                    f"Baixando {documento} {ano} - "
+                    f"tentativa {tentativa}/{CVM_RETRIES}..."
+                ),
+                flush=True,
             )
 
             with requests.get(
                 url,
                 headers=headers,
-                timeout=TIMEOUT,
+                timeout=CVM_TIMEOUT,
                 stream=True,
             ) as response:
-
                 response.raise_for_status()
 
                 partes = [
                     bloco
-
-                    for bloco
-                    in response.iter_content(
-                        chunk_size=(
-                            1024
-                            * 1024
-                        )
+                    for bloco in response.iter_content(
+                        chunk_size=1024 * 1024
                     )
-
                     if bloco
                 ]
 
-            conteudo = b"".join(
-                partes
-            )
+            conteudo = b"".join(partes)
 
-            if len(
-                conteudo
-            ) < 100:
-
+            if len(conteudo) < 100:
                 raise RuntimeError(
-                    (
-                        f"Arquivo {documento} "
-                        f"{ano} vazio "
-                        "ou incompleto."
-                    )
+                    f"Arquivo {documento} {ano} vazio ou incompleto."
                 )
 
             return conteudo
 
         except Exception as exc:
-
             ultimo_erro = exc
-
-            if tentativa < RETRIES:
-                time.sleep(
-                    tentativa * 5
-                )
+            if tentativa < CVM_RETRIES:
+                time.sleep(tentativa * 5)
 
     raise RuntimeError(
-        (
-            f"Falha ao baixar "
-            f"{documento} {ano}: "
-            f"{ultimo_erro}"
-        )
+        f"Falha ao baixar {documento} {ano}: {ultimo_erro}"
     )
 
 
 def localizar_arquivo_composicao(
     zip_file: ZipFile,
 ) -> str | None:
-
     candidatos = [
         nome
-
-        for nome
-        in zip_file.namelist()
-
-        if nome.upper().endswith(
-            ".CSV"
-        )
-
-        and (
-            "COMPOSICAO_CAPITAL"
-            in nome.upper()
-        )
+        for nome in zip_file.namelist()
+        if nome.upper().endswith(".CSV")
+        and "COMPOSICAO_CAPITAL" in nome.upper()
     ]
 
     if not candidatos:
         return None
 
-    candidatos.sort(
-        key=lambda nome: (
-            len(nome),
-            nome,
-        )
-    )
-
+    candidatos.sort(key=lambda nome: (len(nome), nome))
     return candidatos[0]
 
 
@@ -899,35 +482,14 @@ def processar_csv(
     documento: str,
     ano: int,
     universo: dict[str, dict],
-) -> tuple[
-    int,
-    list[dict],
-    str | None,
-]:
-
-    with ZipFile(
-        BytesIO(
-            conteudo
-        )
-    ) as zip_file:
-
-        nome_arquivo = (
-            localizar_arquivo_composicao(
-                zip_file
-            )
-        )
+) -> tuple[int, list[dict], str | None]:
+    with ZipFile(BytesIO(conteudo)) as zip_file:
+        nome_arquivo = localizar_arquivo_composicao(zip_file)
 
         if nome_arquivo is None:
-            return (
-                0,
-                [],
-                None,
-            )
+            return 0, [], None
 
-        with zip_file.open(
-            nome_arquivo
-        ) as arquivo:
-
+        with zip_file.open(nome_arquivo) as arquivo:
             df = pd.read_csv(
                 arquivo,
                 sep=";",
@@ -937,350 +499,172 @@ def processar_csv(
             )
 
     df.columns = [
-        str(
-            coluna
-        ).strip().upper()
-
-        for coluna
-        in df.columns
+        str(coluna).strip().upper()
+        for coluna in df.columns
     ]
 
-    lidos = len(
-        df
-    )
+    lidos = len(df)
 
-    obrigatorias = {
-        "CNPJ_CIA",
-        "DT_REFER",
-    }
-
-    if not obrigatorias.issubset(
-        set(
-            df.columns
-        )
-    ):
+    if not {"CNPJ_CIA", "DT_REFER"}.issubset(df.columns):
         raise CVMCapitalError(
-            (
-                f"Arquivo {nome_arquivo} "
-                "sem CNPJ_CIA/DT_REFER."
-            )
+            f"Arquivo {nome_arquivo} sem CNPJ_CIA/DT_REFER."
         )
 
-    df[
-        "_CNPJ"
-    ] = (
-        df[
-            "CNPJ_CIA"
-        ]
+    df["_CNPJ"] = (
+        df["CNPJ_CIA"]
         .fillna("")
-        .map(
-            normalizar_cnpj
-        )
+        .map(normalizar_cnpj)
     )
 
     df = df[
-        df[
-            "_CNPJ"
-        ].isin(
-            universo.keys()
+        df["_CNPJ"].isin(universo.keys())
+    ].copy()
+
+    if df.empty:
+        return lidos, [], nome_arquivo
+
+    df["_DATA_REF"] = (
+        df["DT_REFER"]
+        .fillna("")
+        .map(parse_data)
+    )
+
+    df = df[
+        df["_DATA_REF"].notna()
+    ].copy()
+
+    df = df[
+        df["_DATA_REF"].map(
+            lambda valor: valor.year == ano
         )
     ].copy()
 
     if df.empty:
-        return (
-            lidos,
-            [],
-            nome_arquivo,
-        )
-
-    df[
-        "_DATA_REF"
-    ] = (
-        df[
-            "DT_REFER"
-        ]
-        .fillna("")
-        .map(
-            parse_data
-        )
-    )
-
-    df = df[
-        df[
-            "_DATA_REF"
-        ].notna()
-    ].copy()
-
-    df = df[
-        df[
-            "_DATA_REF"
-        ].map(
-            lambda valor:
-                valor.year
-                == ano
-        )
-    ].copy()
-
-    if df.empty:
-        return (
-            lidos,
-            [],
-            nome_arquivo,
-        )
+        return lidos, [], nome_arquivo
 
     if "VERSAO" in df.columns:
-
-        df[
-            "_VERSAO"
-        ] = pd.to_numeric(
-            df[
-                "VERSAO"
-            ],
+        df["_VERSAO"] = pd.to_numeric(
+            df["VERSAO"],
             errors="coerce",
-        ).fillna(
-            0
-        )
+        ).fillna(0)
 
         max_versao = (
             df.groupby(
-                [
-                    "_CNPJ",
-                    "_DATA_REF",
-                ]
-            )[
-                "_VERSAO"
-            ]
-            .transform(
-                "max"
-            )
+                ["_CNPJ", "_DATA_REF"]
+            )["_VERSAO"]
+            .transform("max")
         )
 
         df = df[
-            df[
-                "_VERSAO"
-            ]
-            == max_versao
+            df["_VERSAO"] == max_versao
         ].copy()
-
     else:
-        df[
-            "_VERSAO"
-        ] = 0
+        df["_VERSAO"] = 0
 
     colunas_quantidade = {
         "qt_acao_ordin_cap_integr":
             "QT_ACAO_ORDIN_CAP_INTEGR",
-
         "qt_acao_pref_cap_integr":
             "QT_ACAO_PREF_CAP_INTEGR",
-
         "qt_acao_total_cap_integr":
             "QT_ACAO_TOTAL_CAP_INTEGR",
-
         "qt_acao_ordin_tesouro":
             "QT_ACAO_ORDIN_TESOURO",
-
         "qt_acao_pref_tesouro":
             "QT_ACAO_PREF_TESOURO",
-
         "qt_acao_total_tesouro":
             "QT_ACAO_TOTAL_TESOURO",
     }
 
-    registros = {}
+    registros: dict[tuple, dict] = {}
 
-    for _, row in (
-        df.iterrows()
-    ):
-
-        cnpj = row[
-            "_CNPJ"
-        ]
-
-        empresa = (
-            universo.get(
-                cnpj
-            )
-        )
+    for _, row in df.iterrows():
+        cnpj = row["_CNPJ"]
+        empresa = universo.get(cnpj)
 
         if not empresa:
             continue
 
         quantidades = {
-            destino:
-                parse_inteiro(
-                    (
-                        row.get(
-                            origem
-                        )
-
-                        if origem
-                        in df.columns
-                        else None
-                    )
-                )
-
-            for (
-                destino,
-                origem,
+            destino: parse_inteiro(
+                row.get(origem)
+                if origem in df.columns
+                else None
             )
-            in colunas_quantidade.items()
+            for destino, origem in colunas_quantidade.items()
         }
 
         registro = {
-            "codigo_cvm":
-                empresa[
-                    "codigo_cvm"
-                ],
-
-            "cnpj":
-                cnpj,
-
-            "codigo_emissor":
-                empresa[
-                    "codigo_emissor"
-                ],
-
-            "data_referencia":
-                row[
-                    "_DATA_REF"
-                ],
-
-            "versao":
-                int(
-                    row[
-                        "_VERSAO"
-                    ]
-                ),
-
-            "documento":
-                documento,
-
+            "codigo_cvm": empresa["codigo_cvm"],
+            "cnpj": cnpj,
+            "codigo_emissor": empresa["codigo_emissor"],
+            "data_referencia": row["_DATA_REF"],
+            "versao": int(row["_VERSAO"]),
+            "documento": documento,
             **quantidades,
-
-            "fonte":
-                FONTES[
-                    documento
-                ],
+            "fonte": FONTES[documento],
         }
 
         chave = (
-            registro[
-                "codigo_cvm"
-            ],
-            registro[
-                "data_referencia"
-            ],
+            registro["codigo_cvm"],
+            registro["data_referencia"],
             documento,
         )
 
-        anterior = (
-            registros.get(
-                chave
-            )
-        )
+        anterior = registros.get(chave)
 
         if (
             anterior is None
-            or registro[
-                "versao"
-            ]
-            >= anterior[
-                "versao"
-            ]
+            or registro["versao"] >= anterior["versao"]
         ):
-            registros[
-                chave
-            ] = registro
+            registros[chave] = registro
 
-    return (
-        lidos,
-        list(
-            registros.values()
-        ),
-        nome_arquivo,
-    )
+    return lidos, list(registros.values()), nome_arquivo
 
 
-def normalizar_com_b3(
-    registros: list[dict],
-) -> dict:
-
+def normalizar_com_b3(registros: list[dict]) -> dict:
     session = criar_session_b3()
-
-    cache = {}
+    cache: dict[str, dict | None] = {}
 
     stats = {
-        "empresas_consultadas_b3":
-            0,
-
-        "empresas_com_acoes_b3":
-            0,
-
-        "linhas_fator_1":
-            0,
-
-        "linhas_fator_1000":
-            0,
-
-        "linhas_fator_1000000":
-            0,
-
-        "linhas_validadas_b3":
-            0,
-
-        "linhas_sem_ancora_b3":
-            0,
+        "empresas_consultadas_b3": 0,
+        "empresas_com_acoes_b3": 0,
+        "linhas_fator_1": 0,
+        "linhas_fator_1000": 0,
+        "linhas_fator_1000000": 0,
+        "linhas_validadas_b3": 0,
+        "linhas_sem_ancora_b3": 0,
+        "falhas_consulta_b3": 0,
     }
 
     try:
-
-        for registro in registros:
-
-            codigo_emissor = (
-                registro.get(
-                    "codigo_emissor"
-                )
-            )
+        for indice, registro in enumerate(registros, start=1):
+            codigo_emissor = registro.get("codigo_emissor")
 
             if (
                 codigo_emissor
-                and codigo_emissor
-                not in cache
+                and codigo_emissor not in cache
             ):
-
-                stats[
-                    "empresas_consultadas_b3"
-                ] += 1
+                stats["empresas_consultadas_b3"] += 1
 
                 try:
-
-                    cache[
-                        codigo_emissor
-                    ] = obter_acoes_b3(
+                    cache[codigo_emissor] = obter_acoes_b3(
                         session,
                         codigo_emissor,
                     )
-
                 except Exception as exc:
-
+                    stats["falhas_consulta_b3"] += 1
+                    cache[codigo_emissor] = None
                     print(
                         (
-                            "Aviso: B3 sem âncora "
-                            f"para {codigo_emissor}: "
-                            f"{exc}"
-                        )
+                            "Aviso: falha B3 para "
+                            f"{codigo_emissor}: {exc}"
+                        ),
+                        flush=True,
                     )
 
-                    cache[
-                        codigo_emissor
-                    ] = None
-
             info_b3 = (
-                cache.get(
-                    codigo_emissor
-                )
-
+                cache.get(codigo_emissor)
                 if codigo_emissor
                 else None
             )
@@ -1290,19 +674,12 @@ def normalizar_com_b3(
             )
 
             total_b3 = (
-                info_b3[
-                    "total"
-                ]
-
+                info_b3["total"]
                 if info_b3
                 else None
             )
 
-            (
-                fator,
-                divergencia,
-                validado,
-            ) = escolher_fator_escala(
+            fator, divergencia, validado = escolher_fator_escala(
                 total_cvm,
                 total_b3,
             )
@@ -1315,91 +692,60 @@ def normalizar_com_b3(
                 "qt_acao_pref_tesouro",
                 "qt_acao_total_tesouro",
             ):
-
-                registro[
-                    campo
-                ] = multiplicar(
-                    registro.get(
-                        campo
-                    ),
+                registro[campo] = multiplicar(
+                    registro.get(campo),
                     fator,
                 )
 
-            registro[
-                "qt_acao_ordin_circulacao"
-            ] = calcular_circulacao(
-                registro.get(
-                    "qt_acao_ordin_cap_integr"
-                ),
-                registro.get(
-                    "qt_acao_ordin_tesouro"
-                ),
+            registro["qt_acao_ordin_circulacao"] = (
+                calcular_circulacao(
+                    registro.get("qt_acao_ordin_cap_integr"),
+                    registro.get("qt_acao_ordin_tesouro"),
+                )
             )
 
-            registro[
-                "qt_acao_pref_circulacao"
-            ] = calcular_circulacao(
-                registro.get(
-                    "qt_acao_pref_cap_integr"
-                ),
-                registro.get(
-                    "qt_acao_pref_tesouro"
-                ),
+            registro["qt_acao_pref_circulacao"] = (
+                calcular_circulacao(
+                    registro.get("qt_acao_pref_cap_integr"),
+                    registro.get("qt_acao_pref_tesouro"),
+                )
             )
 
-            registro[
-                "qt_acao_total_circulacao"
-            ] = calcular_circulacao(
-                registro.get(
-                    "qt_acao_total_cap_integr"
-                ),
-                registro.get(
-                    "qt_acao_total_tesouro"
-                ),
+            registro["qt_acao_total_circulacao"] = (
+                calcular_circulacao(
+                    registro.get("qt_acao_total_cap_integr"),
+                    registro.get("qt_acao_total_tesouro"),
+                )
             )
 
-            registro[
-                "fator_escala_aplicado"
-            ] = fator
+            registro["fator_escala_aplicado"] = fator
+            registro["total_acoes_b3"] = total_b3
+            registro["divergencia_relativa_b3"] = divergencia
+            registro["validado_b3"] = validado
 
-            registro[
-                "total_acoes_b3"
-            ] = total_b3
-
-            registro[
-                "divergencia_relativa_b3"
-            ] = divergencia
-
-            registro[
-                "validado_b3"
-            ] = validado
-
-            stats[
-                f"linhas_fator_{fator}"
-            ] += 1
+            stats[f"linhas_fator_{fator}"] += 1
 
             if validado:
-                stats[
-                    "linhas_validadas_b3"
-                ] += 1
+                stats["linhas_validadas_b3"] += 1
 
             if total_b3 is None:
-                stats[
-                    "linhas_sem_ancora_b3"
-                ] += 1
+                stats["linhas_sem_ancora_b3"] += 1
+
+            if indice % 50 == 0 or indice == len(registros):
+                print(
+                    (
+                        f"Normalização B3: {indice}/"
+                        f"{len(registros)} linhas."
+                    ),
+                    flush=True,
+                )
 
     finally:
-
         session.close()
 
-    stats[
-        "empresas_com_acoes_b3"
-    ] = sum(
+    stats["empresas_com_acoes_b3"] = sum(
         1
-
-        for valor
-        in cache.values()
-
+        for valor in cache.values()
         if valor is not None
     )
 
@@ -1410,19 +756,8 @@ def dividir_em_lotes(
     registros: list[dict],
     tamanho: int,
 ):
-
-    for inicio in range(
-        0,
-        len(
-            registros
-        ),
-        tamanho,
-    ):
-
-        yield registros[
-            inicio:
-            inicio + tamanho
-        ]
+    for inicio in range(0, len(registros), tamanho):
+        yield registros[inicio:inicio + tamanho]
 
 
 def gravar(
@@ -1431,268 +766,135 @@ def gravar(
     ano: int,
     registros: list[dict],
 ) -> int:
-
-    fonte = FONTES[
-        documento
-    ]
+    fonte = FONTES[documento]
 
     with conn.cursor() as cur:
-
         cur.execute(
             """
-            delete from
-                investimento.composicao_capital_cvm
-
-            where
-                documento = %s
-
-                and fonte = %s
-
-                and data_referencia
-                    >= make_date(
-                        %s,
-                        1,
-                        1
-                    )
-
-                and data_referencia
-                    < make_date(
-                        %s + 1,
-                        1,
-                        1
-                    )
+            delete from investimento.composicao_capital_cvm
+            where documento = %s
+              and fonte = %s
+              and data_referencia >= make_date(%s, 1, 1)
+              and data_referencia < make_date(%s + 1, 1, 1)
             """,
-            (
-                documento,
-                fonte,
-                ano,
-                ano,
-            ),
+            (documento, fonte, ano, ano),
         )
 
         for lote in dividir_em_lotes(
             registros,
             INSERT_BATCH_SIZE,
         ):
-
             cur.executemany(
                 """
-                insert into
-                    investimento.composicao_capital_cvm (
-                        codigo_cvm,
-                        cnpj,
-                        data_referencia,
-                        versao,
-                        documento,
+                insert into investimento.composicao_capital_cvm (
+                    codigo_cvm,
+                    cnpj,
+                    data_referencia,
+                    versao,
+                    documento,
 
-                        qt_acao_ordin_cap_integr,
-                        qt_acao_pref_cap_integr,
-                        qt_acao_total_cap_integr,
+                    qt_acao_ordin_cap_integr,
+                    qt_acao_pref_cap_integr,
+                    qt_acao_total_cap_integr,
 
-                        qt_acao_ordin_tesouro,
-                        qt_acao_pref_tesouro,
-                        qt_acao_total_tesouro,
+                    qt_acao_ordin_tesouro,
+                    qt_acao_pref_tesouro,
+                    qt_acao_total_tesouro,
 
-                        qt_acao_ordin_circulacao,
-                        qt_acao_pref_circulacao,
-                        qt_acao_total_circulacao,
+                    qt_acao_ordin_circulacao,
+                    qt_acao_pref_circulacao,
+                    qt_acao_total_circulacao,
 
-                        fator_escala_aplicado,
-                        total_acoes_b3,
-                        divergencia_relativa_b3,
-                        validado_b3,
+                    fator_escala_aplicado,
+                    total_acoes_b3,
+                    divergencia_relativa_b3,
+                    validado_b3,
 
-                        fonte,
-                        coletado_em
-                    )
-
-                values (
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-
-                    %s,
-                    %s,
-                    %s,
-
-                    %s,
-                    %s,
-                    %s,
-
-                    %s,
-                    %s,
-                    %s,
-
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-
-                    %s,
-                    now()
+                    fonte,
+                    coletado_em
                 )
-
+                values (
+                    %s, %s, %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s, %s,
+                    %s, now()
+                )
                 on conflict (
                     codigo_cvm,
                     data_referencia,
                     documento
                 )
-
                 do update set
-
-                    cnpj =
-                        excluded.cnpj,
-
-                    versao =
-                        excluded.versao,
+                    cnpj = excluded.cnpj,
+                    versao = excluded.versao,
 
                     qt_acao_ordin_cap_integr =
-                        excluded
-                        .qt_acao_ordin_cap_integr,
-
+                        excluded.qt_acao_ordin_cap_integr,
                     qt_acao_pref_cap_integr =
-                        excluded
-                        .qt_acao_pref_cap_integr,
-
+                        excluded.qt_acao_pref_cap_integr,
                     qt_acao_total_cap_integr =
-                        excluded
-                        .qt_acao_total_cap_integr,
+                        excluded.qt_acao_total_cap_integr,
 
                     qt_acao_ordin_tesouro =
-                        excluded
-                        .qt_acao_ordin_tesouro,
-
+                        excluded.qt_acao_ordin_tesouro,
                     qt_acao_pref_tesouro =
-                        excluded
-                        .qt_acao_pref_tesouro,
-
+                        excluded.qt_acao_pref_tesouro,
                     qt_acao_total_tesouro =
-                        excluded
-                        .qt_acao_total_tesouro,
+                        excluded.qt_acao_total_tesouro,
 
                     qt_acao_ordin_circulacao =
-                        excluded
-                        .qt_acao_ordin_circulacao,
-
+                        excluded.qt_acao_ordin_circulacao,
                     qt_acao_pref_circulacao =
-                        excluded
-                        .qt_acao_pref_circulacao,
-
+                        excluded.qt_acao_pref_circulacao,
                     qt_acao_total_circulacao =
-                        excluded
-                        .qt_acao_total_circulacao,
+                        excluded.qt_acao_total_circulacao,
 
                     fator_escala_aplicado =
-                        excluded
-                        .fator_escala_aplicado,
-
+                        excluded.fator_escala_aplicado,
                     total_acoes_b3 =
-                        excluded
-                        .total_acoes_b3,
-
+                        excluded.total_acoes_b3,
                     divergencia_relativa_b3 =
-                        excluded
-                        .divergencia_relativa_b3,
-
+                        excluded.divergencia_relativa_b3,
                     validado_b3 =
-                        excluded
-                        .validado_b3,
+                        excluded.validado_b3,
 
-                    fonte =
-                        excluded.fonte,
-
-                    coletado_em =
-                        now()
+                    fonte = excluded.fonte,
+                    coletado_em = now()
                 """,
                 [
                     (
-                        registro[
-                            "codigo_cvm"
-                        ],
+                        registro["codigo_cvm"],
+                        registro["cnpj"],
+                        registro["data_referencia"],
+                        registro["versao"],
+                        registro["documento"],
 
-                        registro[
-                            "cnpj"
-                        ],
+                        registro["qt_acao_ordin_cap_integr"],
+                        registro["qt_acao_pref_cap_integr"],
+                        registro["qt_acao_total_cap_integr"],
 
-                        registro[
-                            "data_referencia"
-                        ],
+                        registro["qt_acao_ordin_tesouro"],
+                        registro["qt_acao_pref_tesouro"],
+                        registro["qt_acao_total_tesouro"],
 
-                        registro[
-                            "versao"
-                        ],
+                        registro["qt_acao_ordin_circulacao"],
+                        registro["qt_acao_pref_circulacao"],
+                        registro["qt_acao_total_circulacao"],
 
-                        registro[
-                            "documento"
-                        ],
+                        registro["fator_escala_aplicado"],
+                        registro["total_acoes_b3"],
+                        registro["divergencia_relativa_b3"],
+                        registro["validado_b3"],
 
-                        registro[
-                            "qt_acao_ordin_cap_integr"
-                        ],
-
-                        registro[
-                            "qt_acao_pref_cap_integr"
-                        ],
-
-                        registro[
-                            "qt_acao_total_cap_integr"
-                        ],
-
-                        registro[
-                            "qt_acao_ordin_tesouro"
-                        ],
-
-                        registro[
-                            "qt_acao_pref_tesouro"
-                        ],
-
-                        registro[
-                            "qt_acao_total_tesouro"
-                        ],
-
-                        registro[
-                            "qt_acao_ordin_circulacao"
-                        ],
-
-                        registro[
-                            "qt_acao_pref_circulacao"
-                        ],
-
-                        registro[
-                            "qt_acao_total_circulacao"
-                        ],
-
-                        registro[
-                            "fator_escala_aplicado"
-                        ],
-
-                        registro[
-                            "total_acoes_b3"
-                        ],
-
-                        registro[
-                            "divergencia_relativa_b3"
-                        ],
-
-                        registro[
-                            "validado_b3"
-                        ],
-
-                        registro[
-                            "fonte"
-                        ],
+                        registro["fonte"],
                     )
-
-                    for registro
-                    in lote
+                    for registro in lote
                 ],
             )
 
-    return len(
-        registros
-    )
+    return len(registros)
 
 
 def coletar(
@@ -1700,71 +902,33 @@ def coletar(
     documento: str,
     ano: int,
 ) -> dict:
-
-    documento = (
-        documento
-        .upper()
-        .strip()
-    )
+    documento = documento.upper().strip()
 
     if documento not in URLS:
         raise ValueError(
-            (
-                "Documento inválido: "
-                f"{documento}"
-            )
+            f"Documento inválido: {documento}"
         )
 
     if ano < 2020:
-
         return {
-            "documento":
-                documento,
-
-            "ano":
-                ano,
-
-            "arquivo":
-                None,
-
-            "registros_lidos":
-                0,
-
-            "registros_gravados":
-                0,
-
-            "empresas":
-                0,
-
-            "arquivo_ausente":
-                True,
-
-            "motivo":
-                (
-                    "Composição do capital "
-                    "não é publicada nos "
-                    "ZIPs DFP/ITR "
-                    "anteriores a 2020."
-                ),
-
-            "normalizacao_b3":
-                {},
+            "documento": documento,
+            "ano": ano,
+            "arquivo": None,
+            "registros_lidos": 0,
+            "registros_gravados": 0,
+            "empresas": 0,
+            "arquivo_ausente": True,
+            "motivo": (
+                "Composição do capital não é publicada "
+                "nos ZIPs DFP/ITR anteriores a 2020."
+            ),
+            "normalizacao_b3": {},
         }
 
-    universo = carregar_universo(
-        conn
-    )
+    universo = carregar_universo(conn)
+    conteudo = baixar_zip(documento, ano)
 
-    conteudo = baixar_zip(
-        documento,
-        ano,
-    )
-
-    (
-        lidos,
-        registros,
-        nome_arquivo,
-    ) = processar_csv(
+    lidos, registros, nome_arquivo = processar_csv(
         conteudo,
         documento,
         ano,
@@ -1773,39 +937,27 @@ def coletar(
 
     normalizacao_b3 = {}
 
-    if (
-        nome_arquivo is None
-        or lidos == 0
-    ):
-
+    if nome_arquivo is None or lidos == 0:
         gravados = 0
 
     elif not registros:
-
         raise CVMCapitalError(
             (
-                f"Arquivo {nome_arquivo} "
-                "foi lido, mas nenhuma "
-                "companhia do universo "
-                "foi mapeada. "
-                "A carga anterior foi "
-                "preservada."
+                f"Arquivo {nome_arquivo} foi lido, mas "
+                "nenhuma companhia do universo foi mapeada. "
+                "A carga anterior foi preservada."
             )
         )
 
     else:
-
-        normalizacao_b3 = (
-            normalizar_com_b3(
-                registros
-            )
-        )
+        normalizacao_b3 = normalizar_com_b3(registros)
 
         print(
             (
-                "Normalização B3: "
+                "Normalização B3 concluída: "
                 f"{normalizacao_b3}"
-            )
+            ),
+            flush=True,
         )
 
         gravados = gravar(
@@ -1816,39 +968,18 @@ def coletar(
         )
 
     return {
-        "documento":
-            documento,
-
-        "ano":
-            ano,
-
-        "arquivo":
-            nome_arquivo,
-
-        "registros_lidos":
-            lidos,
-
-        "registros_gravados":
-            gravados,
-
-        "empresas":
-            len(
-                {
-                    registro[
-                        "codigo_cvm"
-                    ]
-
-                    for registro
-                    in registros
-                }
-            ),
-
-        "arquivo_ausente":
-            nome_arquivo is None,
-
-        "motivo":
-            None,
-
-        "normalizacao_b3":
-            normalizacao_b3,
+        "documento": documento,
+        "ano": ano,
+        "arquivo": nome_arquivo,
+        "registros_lidos": lidos,
+        "registros_gravados": gravados,
+        "empresas": len(
+            {
+                registro["codigo_cvm"]
+                for registro in registros
+            }
+        ),
+        "arquivo_ausente": nome_arquivo is None,
+        "motivo": None,
+        "normalizacao_b3": normalizacao_b3,
     }
