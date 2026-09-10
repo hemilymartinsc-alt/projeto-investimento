@@ -19,6 +19,7 @@ with acoes as (
     where elegivel_analise = true
       and codigo_cvm is not null
 ),
+
 setores as (
     select
         codigo_cvm,
@@ -40,21 +41,27 @@ setores as (
     where codigo_cvm is not null
     group by codigo_cvm
 ),
+
 dre_raw as (
     select
         codigo_cvm,
         data_referencia,
         fonte,
+
         max(valor) filter (
             where codigo_conta = '3.01'
         ) as receita,
+
         max(descricao_conta) filter (
             where codigo_conta = '3.01'
         ) as receita_descricao,
+
         max(valor) filter (
             where codigo_conta = '3.11'
         ) as lucro
+
     from investimento.demonstracoes_financeiras
+
     where fonte in (
         'CVM_DFP',
         'CVM_ITR'
@@ -65,11 +72,13 @@ dre_raw as (
           '3.11'
       )
       and codigo_cvm is not null
+
     group by
         codigo_cvm,
         data_referencia,
         fonte
 ),
+
 dre_atual as (
     select distinct on (
         codigo_cvm,
@@ -81,7 +90,9 @@ dre_atual as (
         receita,
         receita_descricao,
         lucro
+
     from dre_raw
+
     order by
         codigo_cvm,
         data_referencia,
@@ -91,6 +102,7 @@ dre_atual as (
             else 1
         end
 ),
+
 bp_raw as (
     select
         codigo_cvm,
@@ -156,6 +168,7 @@ bp_raw as (
         ) as divida_longo
 
     from investimento.demonstracoes_financeiras
+
     where fonte in (
         'CVM_DFP',
         'CVM_ITR'
@@ -180,18 +193,22 @@ bp_raw as (
               )
           )
       )
+
     group by
         codigo_cvm,
         data_referencia,
         fonte
 ),
+
 bp_atual as (
     select distinct on (
         codigo_cvm,
         data_referencia
     )
         *
+
     from bp_raw
+
     order by
         codigo_cvm,
         data_referencia,
@@ -201,6 +218,7 @@ bp_atual as (
             else 1
         end
 ),
+
 refs as (
     select
         codigo_cvm,
@@ -214,6 +232,7 @@ refs as (
         data_referencia
     from bp_atual
 ),
+
 base as (
     select
         r.codigo_cvm,
@@ -284,14 +303,19 @@ base as (
         select
             x.receita,
             x.lucro
+
         from dre_raw x
+
         where x.codigo_cvm
               = r.codigo_cvm
-          and x.fonte = 'CVM_DFP'
+          and x.fonte
+              = 'CVM_DFP'
           and x.data_referencia
               < r.data_referencia
+
         order by
             x.data_referencia desc
+
         limit 1
     ) anual on true
 
@@ -299,10 +323,15 @@ base as (
         select
             x.receita,
             x.lucro
+
         from dre_raw x
+
         where x.codigo_cvm
               = r.codigo_cvm
-          and x.fonte = 'CVM_ITR'
+
+          and x.fonte
+              = 'CVM_ITR'
+
           and x.data_referencia between
               (
                   (
@@ -319,6 +348,7 @@ base as (
                   )::date
                   + 10
               )
+
         order by
             abs(
                 x.data_referencia
@@ -328,17 +358,22 @@ base as (
                 )::date
             ),
             x.data_referencia desc
+
         limit 1
     ) anterior on true
 
     left join lateral (
         select
             x.patrimonio_liquido
+
         from bp_raw x
+
         where x.codigo_cvm
               = r.codigo_cvm
+
           and x.patrimonio_liquido
               is not null
+
           and x.data_referencia between
               (
                   (
@@ -355,6 +390,7 @@ base as (
                   )::date
                   + 10
               )
+
         order by
             abs(
                 x.data_referencia
@@ -364,22 +400,27 @@ base as (
                 )::date
             ),
             case
-                when x.fonte = 'CVM_DFP'
+                when x.fonte
+                     = 'CVM_DFP'
                     then 0
                 else 1
             end
+
         limit 1
     ) pl_anterior on true
 ),
+
 ttm as (
     select
         *,
 
         case
-            when dre_fonte = 'CVM_DFP'
+            when dre_fonte
+                 = 'CVM_DFP'
                 then receita_atual
 
-            when dre_fonte = 'CVM_ITR'
+            when dre_fonte
+                 = 'CVM_ITR'
               and receita_anual
                   is not null
               and receita_ano_anterior
@@ -393,10 +434,12 @@ ttm as (
         end as receita_ttm,
 
         case
-            when dre_fonte = 'CVM_DFP'
+            when dre_fonte
+                 = 'CVM_DFP'
                 then lucro_atual
 
-            when dre_fonte = 'CVM_ITR'
+            when dre_fonte
+                 = 'CVM_ITR'
               and lucro_anual
                   is not null
               and lucro_ano_anterior
@@ -411,6 +454,7 @@ ttm as (
 
     from base
 ),
+
 empresa as (
     select
         codigo_cvm,
@@ -425,9 +469,10 @@ empresa as (
 
             when caixa is not null
               and (
-                  divida_curto is not null
+                  divida_curto
+                      is not null
                   or divida_longo
-                     is not null
+                      is not null
               )
                 then
                     coalesce(
@@ -444,10 +489,12 @@ empresa as (
         end as divida_liquida,
 
         case
-            when patrimonio_liquido > 0
-              and patrimonio_liquido_ano_anterior > 0
+            when patrimonio_liquido
+                    > 0
+              and patrimonio_liquido_ano_anterior
+                    > 0
               and lucro_liquido_ttm
-                  is not null
+                    is not null
                 then
                     lucro_liquido_ttm
                     / nullif(
@@ -500,7 +547,8 @@ empresa as (
 
             when receita_ttm
                     is not null
-              and receita_ttm <> 0
+              and receita_ttm
+                    <> 0
               and lucro_liquido_ttm
                     is not null
                 then
@@ -516,7 +564,8 @@ empresa as (
 
             when ativo_circulante
                     is not null
-              and passivo_circulante > 0
+              and passivo_circulante
+                    > 0
                 then
                     ativo_circulante
                     / passivo_circulante
@@ -526,6 +575,7 @@ empresa as (
 
     from ttm
 ),
+
 linhas as (
     select
         a.ativo_id,
@@ -560,6 +610,7 @@ linhas as (
         or e.liquidez_corrente
             is not null
 ),
+
 upserted as (
     insert into investimento.fundamentos_snapshot (
         ativo_id,
@@ -574,6 +625,7 @@ upserted as (
         fonte_base,
         calculado_em
     )
+
     select
         ativo_id,
         data_referencia,
@@ -584,8 +636,9 @@ upserted as (
         roe,
         margem_liquida,
         liquidez_corrente,
-        %s,
+        'CVM_DFP_ITR',
         now()
+
     from linhas
 
     on conflict (
@@ -593,6 +646,7 @@ upserted as (
         data_referencia
     )
     do update set
+
         receita_ttm =
             excluded.receita_ttm,
 
@@ -622,12 +676,17 @@ upserted as (
 
     returning 1
 )
-select count(*)
+
+select
+    count(*)
+
 from upserted
 """
 
 
-def criar_log(conn) -> int:
+def criar_log(
+    conn,
+) -> int:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -693,7 +752,8 @@ def contar_demonstracoes(
     with conn.cursor() as cur:
         cur.execute(
             """
-            select count(*)
+            select
+                count(*)
             from investimento.demonstracoes_financeiras
             where fonte in (
                 'CVM_DFP',
@@ -711,254 +771,18 @@ def calcular_fundamentos(
     conn,
 ) -> int:
     with conn.cursor() as cur:
+
+        # CALCULAR_SQL não recebe parâmetros.
+        #
+        # Isso é intencional: a consulta contém
+        # expressões LIKE com caracteres "%".
+        # Enviar parâmetros junto dessa consulta
+        # faria o psycopg interpretar esses "%"
+        # como placeholders.
         cur.execute(
-            CALCULAR_SQL,
-            (
-                FONTE_BASE,
-            ),
+            CALCULAR_SQL
         )
 
         gravados = cur.fetchone()[0]
 
     return int(
-        gravados or 0
-    )
-
-
-def validar_resultado(
-    conn,
-) -> dict:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            select
-                count(*) as snapshots,
-
-                count(distinct ativo_id)
-                    as ativos,
-
-                min(data_referencia)
-                    as primeira_data,
-
-                max(data_referencia)
-                    as ultima_data,
-
-                count(*) filter (
-                    where receita_ttm
-                        is not null
-                ) as com_receita,
-
-                count(*) filter (
-                    where lucro_liquido_ttm
-                        is not null
-                ) as com_lucro,
-
-                count(*) filter (
-                    where patrimonio_liquido
-                        is not null
-                ) as com_pl,
-
-                count(*) filter (
-                    where roe
-                        is not null
-                ) as com_roe,
-
-                count(*) filter (
-                    where margem_liquida
-                        is not null
-                ) as com_margem,
-
-                count(*) filter (
-                    where liquidez_corrente
-                        is not null
-                ) as com_liquidez,
-
-                count(*) filter (
-                    where divida_liquida
-                        is not null
-                ) as com_divida
-
-            from investimento.fundamentos_snapshot
-            where fonte_base = %s
-            """,
-            (
-                FONTE_BASE,
-            ),
-        )
-
-        row = cur.fetchone()
-
-    return {
-        "snapshots": int(
-            row[0] or 0
-        ),
-        "ativos": int(
-            row[1] or 0
-        ),
-        "primeira_data": row[2],
-        "ultima_data": row[3],
-        "com_receita": int(
-            row[4] or 0
-        ),
-        "com_lucro": int(
-            row[5] or 0
-        ),
-        "com_pl": int(
-            row[6] or 0
-        ),
-        "com_roe": int(
-            row[7] or 0
-        ),
-        "com_margem": int(
-            row[8] or 0
-        ),
-        "com_liquidez": int(
-            row[9] or 0
-        ),
-        "com_divida": int(
-            row[10] or 0
-        ),
-    }
-
-
-def main() -> int:
-    conn = connect()
-    log_id = None
-
-    try:
-        log_id = criar_log(
-            conn
-        )
-
-        lidos = contar_demonstracoes(
-            conn
-        )
-
-        gravados = calcular_fundamentos(
-            conn
-        )
-
-        conn.commit()
-
-        resumo = validar_resultado(
-            conn
-        )
-
-        mensagem = (
-            "Fundamentos calculados a partir "
-            "de DFP/ITR CVM; "
-            f"demonstracoes_lidas={lidos}; "
-            f"linhas_atualizadas={gravados}; "
-            f"snapshots={resumo['snapshots']}; "
-            f"ativos={resumo['ativos']}; "
-            f"periodo={resumo['primeira_data']}.."
-            f"{resumo['ultima_data']}."
-        )
-
-        finalizar_log(
-            conn=conn,
-            log_id=log_id,
-            status="SUCESSO",
-            lidos=lidos,
-            gravados=gravados,
-            mensagem=mensagem,
-        )
-
-        print(
-            "Fundamentos: SUCESSO"
-        )
-
-        print(
-            f"Demonstracoes lidas: "
-            f"{lidos}"
-        )
-
-        print(
-            f"Linhas atualizadas: "
-            f"{gravados}"
-        )
-
-        print(
-            f"Snapshots no banco: "
-            f"{resumo['snapshots']}"
-        )
-
-        print(
-            f"Ativos cobertos: "
-            f"{resumo['ativos']}"
-        )
-
-        print(
-            f"Periodo: "
-            f"{resumo['primeira_data']} "
-            f"a {resumo['ultima_data']}"
-        )
-
-        print(
-            f"Receita TTM: "
-            f"{resumo['com_receita']}"
-        )
-
-        print(
-            f"Lucro TTM: "
-            f"{resumo['com_lucro']}"
-        )
-
-        print(
-            f"Patrimonio liquido: "
-            f"{resumo['com_pl']}"
-        )
-
-        print(
-            f"ROE: "
-            f"{resumo['com_roe']}"
-        )
-
-        print(
-            f"Margem liquida: "
-            f"{resumo['com_margem']}"
-        )
-
-        print(
-            f"Liquidez corrente: "
-            f"{resumo['com_liquidez']}"
-        )
-
-        print(
-            f"Divida liquida: "
-            f"{resumo['com_divida']}"
-        )
-
-        return 0
-
-    except Exception as exc:
-        conn.rollback()
-
-        if log_id is not None:
-            try:
-                finalizar_log(
-                    conn=conn,
-                    log_id=log_id,
-                    status="ERRO",
-                    lidos=None,
-                    gravados=0,
-                    mensagem=str(exc),
-                )
-            except Exception:
-                pass
-
-        print(
-            f"Fundamentos: erro | {exc}",
-            file=sys.stderr,
-        )
-
-        return 1
-
-    finally:
-        conn.close()
-
-
-if __name__ == "__main__":
-    raise SystemExit(
-        main()
-    )
