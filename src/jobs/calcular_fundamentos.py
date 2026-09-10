@@ -308,8 +308,10 @@ base as (
 
         where x.codigo_cvm
               = r.codigo_cvm
+
           and x.fonte
               = 'CVM_DFP'
+
           and x.data_referencia
               < r.data_referencia
 
@@ -400,8 +402,7 @@ base as (
                 )::date
             ),
             case
-                when x.fonte
-                     = 'CVM_DFP'
+                when x.fonte = 'CVM_DFP'
                     then 0
                 else 1
             end
@@ -415,12 +416,10 @@ ttm as (
         *,
 
         case
-            when dre_fonte
-                 = 'CVM_DFP'
+            when dre_fonte = 'CVM_DFP'
                 then receita_atual
 
-            when dre_fonte
-                 = 'CVM_ITR'
+            when dre_fonte = 'CVM_ITR'
               and receita_anual
                   is not null
               and receita_ano_anterior
@@ -434,12 +433,10 @@ ttm as (
         end as receita_ttm,
 
         case
-            when dre_fonte
-                 = 'CVM_DFP'
+            when dre_fonte = 'CVM_DFP'
                 then lucro_atual
 
-            when dre_fonte
-                 = 'CVM_ITR'
+            when dre_fonte = 'CVM_ITR'
               and lucro_anual
                   is not null
               and lucro_ano_anterior
@@ -489,12 +486,10 @@ empresa as (
         end as divida_liquida,
 
         case
-            when patrimonio_liquido
-                    > 0
-              and patrimonio_liquido_ano_anterior
-                    > 0
+            when patrimonio_liquido > 0
+              and patrimonio_liquido_ano_anterior > 0
               and lucro_liquido_ttm
-                    is not null
+                  is not null
                 then
                     lucro_liquido_ttm
                     / nullif(
@@ -547,8 +542,7 @@ empresa as (
 
             when receita_ttm
                     is not null
-              and receita_ttm
-                    <> 0
+              and receita_ttm <> 0
               and lucro_liquido_ttm
                     is not null
                 then
@@ -564,8 +558,7 @@ empresa as (
 
             when ativo_circulante
                     is not null
-              and passivo_circulante
-                    > 0
+              and passivo_circulante > 0
                 then
                     ativo_circulante
                     / passivo_circulante
@@ -597,16 +590,22 @@ linhas as (
     where
         e.receita_ttm
             is not null
+
         or e.lucro_liquido_ttm
             is not null
+
         or e.patrimonio_liquido
             is not null
+
         or e.divida_liquida
             is not null
+
         or e.roe
             is not null
+
         or e.margem_liquida
             is not null
+
         or e.liquidez_corrente
             is not null
 ),
@@ -712,7 +711,9 @@ def criar_log(
 
     conn.commit()
 
-    return log_id
+    return int(
+        log_id
+    )
 
 
 def finalizar_log(
@@ -762,9 +763,11 @@ def contar_demonstracoes(
             """
         )
 
-        return int(
-            cur.fetchone()[0]
-        )
+        total = cur.fetchone()[0]
+
+    return int(
+        total or 0
+    )
 
 
 def calcular_fundamentos(
@@ -772,13 +775,6 @@ def calcular_fundamentos(
 ) -> int:
     with conn.cursor() as cur:
 
-        # CALCULAR_SQL não recebe parâmetros.
-        #
-        # Isso é intencional: a consulta contém
-        # expressões LIKE com caracteres "%".
-        # Enviar parâmetros junto dessa consulta
-        # faria o psycopg interpretar esses "%"
-        # como placeholders.
         cur.execute(
             CALCULAR_SQL
         )
@@ -786,3 +782,267 @@ def calcular_fundamentos(
         gravados = cur.fetchone()[0]
 
     return int(
+        gravados or 0
+    )
+
+
+def validar_resultado(
+    conn,
+) -> dict:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select
+                count(*) as snapshots,
+
+                count(
+                    distinct ativo_id
+                ) as ativos,
+
+                min(
+                    data_referencia
+                ) as primeira_data,
+
+                max(
+                    data_referencia
+                ) as ultima_data,
+
+                count(*) filter (
+                    where receita_ttm
+                        is not null
+                ) as com_receita,
+
+                count(*) filter (
+                    where lucro_liquido_ttm
+                        is not null
+                ) as com_lucro,
+
+                count(*) filter (
+                    where patrimonio_liquido
+                        is not null
+                ) as com_pl,
+
+                count(*) filter (
+                    where roe
+                        is not null
+                ) as com_roe,
+
+                count(*) filter (
+                    where margem_liquida
+                        is not null
+                ) as com_margem,
+
+                count(*) filter (
+                    where liquidez_corrente
+                        is not null
+                ) as com_liquidez,
+
+                count(*) filter (
+                    where divida_liquida
+                        is not null
+                ) as com_divida
+
+            from investimento.fundamentos_snapshot
+
+            where fonte_base = %s
+            """,
+            (
+                FONTE_BASE,
+            ),
+        )
+
+        row = cur.fetchone()
+
+    return {
+        "snapshots": int(
+            row[0] or 0
+        ),
+
+        "ativos": int(
+            row[1] or 0
+        ),
+
+        "primeira_data":
+            row[2],
+
+        "ultima_data":
+            row[3],
+
+        "com_receita": int(
+            row[4] or 0
+        ),
+
+        "com_lucro": int(
+            row[5] or 0
+        ),
+
+        "com_pl": int(
+            row[6] or 0
+        ),
+
+        "com_roe": int(
+            row[7] or 0
+        ),
+
+        "com_margem": int(
+            row[8] or 0
+        ),
+
+        "com_liquidez": int(
+            row[9] or 0
+        ),
+
+        "com_divida": int(
+            row[10] or 0
+        ),
+    }
+
+
+def main() -> int:
+    conn = connect()
+
+    log_id = None
+
+    try:
+        log_id = criar_log(
+            conn
+        )
+
+        lidos = contar_demonstracoes(
+            conn
+        )
+
+        gravados = calcular_fundamentos(
+            conn
+        )
+
+        conn.commit()
+
+        resumo = validar_resultado(
+            conn
+        )
+
+        mensagem = (
+            "Fundamentos calculados a partir "
+            "de DFP/ITR CVM; "
+            f"demonstracoes_lidas={lidos}; "
+            f"linhas_atualizadas={gravados}; "
+            f"snapshots={resumo['snapshots']}; "
+            f"ativos={resumo['ativos']}; "
+            f"periodo="
+            f"{resumo['primeira_data']}.."
+            f"{resumo['ultima_data']}."
+        )
+
+        finalizar_log(
+            conn=conn,
+            log_id=log_id,
+            status="SUCESSO",
+            lidos=lidos,
+            gravados=gravados,
+            mensagem=mensagem,
+        )
+
+        print(
+            "Fundamentos: SUCESSO"
+        )
+
+        print(
+            "Demonstracoes lidas: "
+            f"{lidos}"
+        )
+
+        print(
+            "Linhas atualizadas: "
+            f"{gravados}"
+        )
+
+        print(
+            "Snapshots no banco: "
+            f"{resumo['snapshots']}"
+        )
+
+        print(
+            "Ativos cobertos: "
+            f"{resumo['ativos']}"
+        )
+
+        print(
+            "Periodo: "
+            f"{resumo['primeira_data']} "
+            "a "
+            f"{resumo['ultima_data']}"
+        )
+
+        print(
+            "Receita TTM: "
+            f"{resumo['com_receita']}"
+        )
+
+        print(
+            "Lucro TTM: "
+            f"{resumo['com_lucro']}"
+        )
+
+        print(
+            "Patrimonio liquido: "
+            f"{resumo['com_pl']}"
+        )
+
+        print(
+            "ROE: "
+            f"{resumo['com_roe']}"
+        )
+
+        print(
+            "Margem liquida: "
+            f"{resumo['com_margem']}"
+        )
+
+        print(
+            "Liquidez corrente: "
+            f"{resumo['com_liquidez']}"
+        )
+
+        print(
+            "Divida liquida: "
+            f"{resumo['com_divida']}"
+        )
+
+        return 0
+
+    except Exception as exc:
+        conn.rollback()
+
+        if log_id is not None:
+            try:
+                finalizar_log(
+                    conn=conn,
+                    log_id=log_id,
+                    status="ERRO",
+                    lidos=None,
+                    gravados=0,
+                    mensagem=str(
+                        exc
+                    ),
+                )
+
+            except Exception:
+                pass
+
+        print(
+            "Fundamentos: erro | "
+            f"{exc}",
+            file=sys.stderr,
+        )
+
+        return 1
+
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        main()
+    )
