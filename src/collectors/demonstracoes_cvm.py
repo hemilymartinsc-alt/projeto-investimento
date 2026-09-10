@@ -37,12 +37,15 @@ TIPOS_ACEITOS = {
     "DRE",
     "DFC_MD",
     "DFC_MI",
+    "DVA",
 }
 
 # Mantemos apenas contas necessárias ao motor.
 # Instituições financeiras podem deslocar o patrimônio líquido
 # entre 2.07, 2.08 ou 2.09 conforme o elenco contábil usado.
 # Mantemos os candidatos e o cálculo identifica o PL pela descrição.
+# A DVA 7.04.01 fornece Depreciação, Amortização e Exaustão,
+# necessária para EBITDA sem estimativa por aproximação.
 CONTAS_RELEVANTES = {
     "BPA": {
         "1",
@@ -103,6 +106,9 @@ CONTAS_RELEVANTES = {
         "6.05",
         "6.05.01",
         "6.05.02",
+    },
+    "DVA": {
+        "7.04.01",
     },
 }
 
@@ -627,6 +633,7 @@ def processar_csv(
             "DRE",
             "DFC_MD",
             "DFC_MI",
+            "DVA",
         }
         and "DT_INI_EXERC" in df.columns
     ):
