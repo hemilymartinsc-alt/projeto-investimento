@@ -39,20 +39,11 @@ TIPOS_ACEITOS = {
     "DFC_MI",
 }
 
-# Mantemos somente contas padronizadas necessárias à primeira
+# Contas padronizadas necessárias à primeira
 # versão do motor fundamentalista.
 #
-# A ideia é preservar:
-# - liquidez;
-# - caixa;
-# - ativos;
-# - dívida;
-# - patrimônio líquido;
-# - receita;
-# - margens;
-# - resultado operacional;
-# - lucro;
-# - fluxo de caixa.
+# A carga é propositalmente enxuta para evitar
+# crescimento excessivo do Supabase.
 CONTAS_RELEVANTES = {
     "BPA": {
         "1",
@@ -110,16 +101,6 @@ CONTAS_RELEVANTES = {
     },
 }
 
-# Algumas contas importantes do fluxo de caixa podem ser
-# contas não fixas da companhia. Guardamos somente quando
-# a descrição indica algo útil ao motor.
-TERMOS_DFC_RELEVANTES = {
-    "DEPRECI",
-    "AMORTIZ",
-    "IMOBILIZAD",
-    "INTANGIV",
-}
-
 
 def normalizar_texto(valor) -> str:
     if valor is None:
@@ -133,7 +114,8 @@ def normalizar_texto(valor) -> str:
     )
 
     texto = "".join(
-        c for c in texto
+        c
+        for c in texto
         if not unicodedata.combining(c)
     )
 
@@ -180,6 +162,7 @@ def parse_data(valor) -> date | None:
                 texto[:10],
                 formato,
             ).date()
+
         except ValueError:
             continue
 
@@ -197,20 +180,37 @@ def parse_decimal(valor) -> Decimal | None:
 
     # Suporta tanto:
     # 12345.67
-    # quanto
+    # quanto:
     # 12.345,67
     if "," in texto and "." in texto:
+
         if texto.rfind(",") > texto.rfind("."):
-            texto = texto.replace(".", "")
-            texto = texto.replace(",", ".")
+            texto = texto.replace(
+                ".",
+                "",
+            )
+
+            texto = texto.replace(
+                ",",
+                ".",
+            )
+
         else:
-            texto = texto.replace(",", "")
+            texto = texto.replace(
+                ",",
+                "",
+            )
 
     elif "," in texto:
-        texto = texto.replace(",", ".")
+        texto = texto.replace(
+            ",",
+            ".",
+        )
 
     try:
-        return Decimal(texto)
+        return Decimal(
+            texto,
+        )
 
     except InvalidOperation:
         return None
@@ -227,8 +227,12 @@ def ajustar_escala(
         escala,
     )
 
-    if escala_normalizada.startswith("MIL"):
-        return valor * Decimal("1000")
+    if escala_normalizada.startswith(
+        "MIL"
+    ):
+        return valor * Decimal(
+            "1000"
+        )
 
     return valor
 
@@ -238,28 +242,14 @@ def conta_relevante(
     codigo: str,
     descricao: str,
 ) -> bool:
-    codigo = str(codigo or "").strip()
+    codigo = str(
+        codigo or ""
+    ).strip()
 
-    if codigo in CONTAS_RELEVANTES.get(
+    return codigo in CONTAS_RELEVANTES.get(
         tipo,
         set(),
-    ):
-        return True
-
-    if tipo in {
-        "DFC_MD",
-        "DFC_MI",
-    }:
-        descricao_normalizada = normalizar_texto(
-            descricao,
-        )
-
-        return any(
-            termo in descricao_normalizada
-            for termo in TERMOS_DFC_RELEVANTES
-        )
-
-    return False
+    )
 
 
 def garantir_fontes(conn) -> None:
@@ -268,17 +258,29 @@ def garantir_fontes(conn) -> None:
             "CVM_DFP",
             "CVM - DFP Companhias Abertas",
             "FUNDAMENTOS",
-            "https://dados.cvm.gov.br/dataset/cia_aberta-doc-dfp",
+            (
+                "https://dados.cvm.gov.br/"
+                "dataset/cia_aberta-doc-dfp"
+            ),
             "SEMANAL",
-            "Demonstrações financeiras anuais padronizadas",
+            (
+                "Demonstrações financeiras "
+                "anuais padronizadas"
+            ),
         ),
         (
             "CVM_ITR",
             "CVM - ITR Companhias Abertas",
             "FUNDAMENTOS",
-            "https://dados.cvm.gov.br/dataset/cia_aberta-doc-itr",
+            (
+                "https://dados.cvm.gov.br/"
+                "dataset/cia_aberta-doc-itr"
+            ),
             "SEMANAL",
-            "Demonstrações financeiras trimestrais estruturadas",
+            (
+                "Demonstrações financeiras "
+                "trimestrais estruturadas"
+            ),
         ),
         (
             "CVM_DFP_ITR",
@@ -286,7 +288,11 @@ def garantir_fontes(conn) -> None:
             "FUNDAMENTOS",
             "https://dados.cvm.gov.br/",
             "SEMANAL",
-            "Coleta normalizada de demonstrações financeiras de companhias abertas",
+            (
+                "Coleta normalizada de "
+                "demonstrações financeiras "
+                "de companhias abertas"
+            ),
         ),
     ]
 
@@ -304,9 +310,13 @@ def garantir_fontes(conn) -> None:
                 ativa
             )
             values (
-                %s, %s, %s,
+                %s,
+                %s,
+                %s,
                 true,
-                %s, %s, %s,
+                %s,
+                %s,
+                %s,
                 true
             )
             on conflict (codigo)
@@ -324,7 +334,9 @@ def garantir_fontes(conn) -> None:
         )
 
 
-def carregar_universo(conn) -> dict[str, dict]:
+def carregar_universo(
+    conn,
+) -> dict[str, dict]:
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -344,15 +356,28 @@ def carregar_universo(conn) -> dict[str, dict]:
 
     universo = {}
 
-    for ativo_id, codigo_cvm, cnpj in rows:
-        codigo_normalizado = normalizar_codigo_cvm(
-            codigo_cvm,
+    for (
+        ativo_id,
+        codigo_cvm,
+        cnpj,
+    ) in rows:
+
+        codigo_normalizado = (
+            normalizar_codigo_cvm(
+                codigo_cvm,
+            )
         )
 
-        universo[codigo_normalizado] = {
+        universo[
+            codigo_normalizado
+        ] = {
             "ativo_id": ativo_id,
-            "codigo_cvm": str(codigo_cvm),
-            "cnpj": normalizar_cnpj(cnpj),
+            "codigo_cvm": str(
+                codigo_cvm
+            ),
+            "cnpj": normalizar_cnpj(
+                cnpj
+            ),
         }
 
     return universo
@@ -362,49 +387,74 @@ def baixar_zip(
     documento: str,
     ano: int,
 ) -> bytes:
-    url = URLS[documento].format(
+    url = URLS[
+        documento
+    ].format(
         ano=ano,
     )
 
     headers = {
         "User-Agent": (
-            "Mozilla/5.0 projeto-investimento/1.0 "
-            "(coleta automatizada de dados publicos CVM)"
+            "Mozilla/5.0 "
+            "projeto-investimento/1.0 "
+            "(coleta automatizada de "
+            "dados publicos CVM)"
         ),
         "Accept": "*/*",
     }
 
     ultimo_erro = None
 
-    for tentativa in range(1, 6):
+    for tentativa in range(
+        1,
+        6,
+    ):
         try:
             print(
-                f"Baixando {documento} {ano} "
-                f"- tentativa {tentativa}/5..."
+                f"Baixando {documento} "
+                f"{ano} - tentativa "
+                f"{tentativa}/5..."
             )
 
             with requests.get(
                 url,
                 headers=headers,
-                timeout=(30, 300),
+                timeout=(
+                    30,
+                    300,
+                ),
                 stream=True,
             ) as response:
+
                 response.raise_for_status()
 
                 partes = []
 
                 for bloco in response.iter_content(
-                    chunk_size=1024 * 1024,
+                    chunk_size=(
+                        1024
+                        * 1024
+                    ),
                 ):
                     if bloco:
-                        partes.append(bloco)
+                        partes.append(
+                            bloco
+                        )
 
-                conteudo = b"".join(partes)
+                conteudo = b"".join(
+                    partes
+                )
 
-            if len(conteudo) < 100:
+            if len(
+                conteudo
+            ) < 100:
                 raise RuntimeError(
-                    f"Arquivo {documento} {ano} vazio "
-                    "ou incompleto."
+                    (
+                        f"Arquivo "
+                        f"{documento} "
+                        f"{ano} vazio "
+                        "ou incompleto."
+                    )
                 )
 
             return conteudo
@@ -414,12 +464,16 @@ def baixar_zip(
 
             if tentativa < 5:
                 time.sleep(
-                    tentativa * 5,
+                    tentativa * 5
                 )
 
     raise RuntimeError(
-        f"Falha ao baixar {documento} {ano}: "
-        f"{ultimo_erro}"
+        (
+            f"Falha ao baixar "
+            f"{documento} "
+            f"{ano}: "
+            f"{ultimo_erro}"
+        )
     )
 
 
@@ -428,7 +482,9 @@ def identificar_arquivo(
 ) -> tuple[str, bool] | None:
     nome_upper = nome.upper()
 
-    if not nome_upper.endswith(".CSV"):
+    if not nome_upper.endswith(
+        ".CSV"
+    ):
         return None
 
     tipo = None
@@ -438,7 +494,10 @@ def identificar_arquivo(
         key=len,
         reverse=True,
     ):
-        if f"_{candidato}_" in nome_upper:
+        if (
+            f"_{candidato}_"
+            in nome_upper
+        ):
             tipo = candidato
             break
 
@@ -447,8 +506,10 @@ def identificar_arquivo(
 
     if "_CON_" in nome_upper:
         consolidado = True
+
     elif "_IND_" in nome_upper:
         consolidado = False
+
     else:
         return None
 
@@ -466,9 +527,14 @@ def processar_csv(
     tipo: str,
     consolidado: bool,
     universo: dict[str, dict],
-) -> tuple[int, list[dict]]:
+) -> tuple[
+    int,
+    list[dict],
+]:
     df = pd.read_csv(
-        BytesIO(conteudo),
+        BytesIO(
+            conteudo
+        ),
         sep=";",
         encoding="latin1",
         dtype=str,
@@ -476,11 +542,15 @@ def processar_csv(
     )
 
     df.columns = [
-        str(coluna).strip().upper()
+        str(
+            coluna
+        ).strip().upper()
         for coluna in df.columns
     ]
 
-    lidos = len(df)
+    lidos = len(
+        df
+    )
 
     colunas_obrigatorias = {
         "CD_CVM",
@@ -490,38 +560,54 @@ def processar_csv(
     }
 
     if not colunas_obrigatorias.issubset(
-        set(df.columns),
+        set(
+            df.columns
+        )
     ):
-        return lidos, []
+        return (
+            lidos,
+            [],
+        )
 
     df["_COD_CVM"] = (
         df["CD_CVM"]
         .fillna("")
-        .map(normalizar_codigo_cvm)
+        .map(
+            normalizar_codigo_cvm
+        )
     )
 
     df = df[
         df["_COD_CVM"].isin(
-            universo.keys(),
+            universo.keys()
         )
     ].copy()
 
     if df.empty:
-        return lidos, []
+        return (
+            lidos,
+            [],
+        )
 
-    # Mantém apenas o exercício atual.
-    # A CVM também fornece a coluna comparativa
-    # do exercício anterior.
+    # Mantém somente o exercício atual.
+    # A CVM também pode disponibilizar
+    # colunas comparativas de períodos
+    # anteriores.
     if "ORDEM_EXERC" in df.columns:
+
         ordem = (
             df["ORDEM_EXERC"]
             .fillna("")
-            .map(normalizar_texto)
+            .map(
+                normalizar_texto
+            )
         )
 
-        mascara_ultimo = ordem.str.contains(
-            "ULTIMO",
-            regex=False,
+        mascara_ultimo = (
+            ordem.str.contains(
+                "ULTIMO",
+                regex=False,
+            )
         )
 
         if mascara_ultimo.any():
@@ -529,14 +615,16 @@ def processar_csv(
                 mascara_ultimo
             ].copy()
 
-    # A CVM pode manter reapresentações.
-    # Mantemos somente a maior versão para
-    # companhia + data de referência.
+    # Mantém somente a maior versão
+    # disponível da demonstração.
     if "VERSAO" in df.columns:
+
         df["_VERSAO"] = pd.to_numeric(
             df["VERSAO"],
             errors="coerce",
-        ).fillna(0)
+        ).fillna(
+            0
+        )
 
         max_versao = (
             df.groupby(
@@ -545,11 +633,14 @@ def processar_csv(
                     "DT_REFER",
                 ]
             )["_VERSAO"]
-            .transform("max")
+            .transform(
+                "max"
+            )
         )
 
         df = df[
-            df["_VERSAO"] == max_versao
+            df["_VERSAO"]
+            == max_versao
         ].copy()
 
     else:
@@ -558,7 +649,9 @@ def processar_csv(
     df["_DATA_REF"] = (
         df["DT_REFER"]
         .fillna("")
-        .map(parse_data)
+        .map(
+            parse_data
+        )
     )
 
     df = df[
@@ -567,16 +660,75 @@ def processar_csv(
 
     df = df[
         df["_DATA_REF"].map(
-            lambda x: x.year == ano
+            lambda x: (
+                x.year == ano
+            )
         )
     ].copy()
 
     if df.empty:
-        return lidos, []
+        return (
+            lidos,
+            [],
+        )
+
+    # DRE e DFC podem conter, para
+    # uma mesma data de referência,
+    # valores trimestrais e acumulados.
+    #
+    # Mantemos somente o período
+    # acumulado mais longo, representado
+    # pela menor DT_INI_EXERC.
+    #
+    # O trimestre isolado poderá ser
+    # calculado posteriormente pela
+    # diferença entre acumulados.
+    if "DT_INI_EXERC" in df.columns:
+
+        df["_DATA_INICIO_TS"] = (
+            pd.to_datetime(
+                df["DT_INI_EXERC"],
+                errors="coerce",
+            )
+        )
+
+        if tipo in {
+            "DRE",
+            "DFC_MD",
+            "DFC_MI",
+        }:
+
+            inicio_minimo = (
+                df.groupby(
+                    [
+                        "_COD_CVM",
+                        "_DATA_REF",
+                        "CD_CONTA",
+                    ]
+                )[
+                    "_DATA_INICIO_TS"
+                ]
+                .transform(
+                    "min"
+                )
+            )
+
+            df = df[
+                (
+                    df[
+                        "_DATA_INICIO_TS"
+                    ].eq(
+                        inicio_minimo
+                    )
+                )
+                |
+                inicio_minimo.isna()
+            ].copy()
 
     registros = []
 
     for _, row in df.iterrows():
+
         codigo_conta = str(
             row.get(
                 "CD_CONTA",
@@ -605,20 +757,22 @@ def processar_csv(
         ]
 
         ativo = universo.get(
-            cod_normalizado,
+            cod_normalizado
         )
 
         if not ativo:
             continue
 
         valor = parse_decimal(
-            row.get("VL_CONTA"),
+            row.get(
+                "VL_CONTA"
+            )
         )
 
         valor = ajustar_escala(
             valor,
             row.get(
-                "ESCALA_MOEDA",
+                "ESCALA_MOEDA"
             ),
         )
 
@@ -627,13 +781,13 @@ def processar_csv(
 
         data_inicio = parse_data(
             row.get(
-                "DT_INI_EXERC",
+                "DT_INI_EXERC"
             )
         )
 
         cnpj = normalizar_cnpj(
             row.get(
-                "CNPJ_CIA",
+                "CNPJ_CIA"
             )
         )
 
@@ -662,10 +816,18 @@ def processar_csv(
                 "data_referencia": row[
                     "_DATA_REF"
                 ],
-                "data_inicio_periodo": data_inicio,
-                "tipo_demonstracao": tipo,
-                "codigo_conta": codigo_conta,
-                "descricao_conta": descricao,
+                "data_inicio_periodo": (
+                    data_inicio
+                ),
+                "tipo_demonstracao": (
+                    tipo
+                ),
+                "codigo_conta": (
+                    codigo_conta
+                ),
+                "descricao_conta": (
+                    descricao
+                ),
                 "valor": valor,
                 "moeda": (
                     row.get(
@@ -673,9 +835,12 @@ def processar_csv(
                     )
                     or "BRL"
                 ),
-                "consolidado": consolidado,
+                "consolidado": (
+                    consolidado
+                ),
                 "documento": (
-                    f"{documento}:{ano}:"
+                    f"{documento}:"
+                    f"{ano}:"
                     f"v{versao}:"
                     f"{nome_arquivo}"
                 ),
@@ -694,44 +859,63 @@ def processar_csv(
 def preferir_consolidado(
     registros: list[dict],
 ) -> list[dict]:
+
     grupos_consolidados = {
         (
             r["ativo_id"],
-            r["data_referencia"],
-            r["tipo_demonstracao"],
+            r[
+                "data_referencia"
+            ],
+            r[
+                "tipo_demonstracao"
+            ],
         )
         for r in registros
-        if r["consolidado"]
+        if r[
+            "consolidado"
+        ]
     }
 
     filtrados = []
 
     for registro in registros:
+
         grupo = (
-            registro["ativo_id"],
-            registro["data_referencia"],
+            registro[
+                "ativo_id"
+            ],
+            registro[
+                "data_referencia"
+            ],
             registro[
                 "tipo_demonstracao"
             ],
         )
 
         if (
-            not registro["consolidado"]
-            and grupo in grupos_consolidados
+            not registro[
+                "consolidado"
+            ]
+            and grupo
+            in grupos_consolidados
         ):
             continue
 
         filtrados.append(
-            registro,
+            registro
         )
 
-    # Segurança contra duplicações dentro
-    # de um mesmo arquivo/reapresentação.
+    # Segurança adicional contra
+    # duplicações dentro de um mesmo
+    # arquivo ou reapresentação.
     unicos = {}
 
     for registro in filtrados:
+
         chave = (
-            registro["ativo_id"],
+            registro[
+                "ativo_id"
+            ],
             registro[
                 "data_referencia"
             ],
@@ -749,7 +933,9 @@ def preferir_consolidado(
             ],
         )
 
-        unicos[chave] = registro
+        unicos[
+            chave
+        ] = registro
 
     return list(
         unicos.values()
@@ -761,45 +947,69 @@ def extrair_documento(
     documento: str,
     ano: int,
     universo: dict[str, dict],
-) -> tuple[int, list[dict]]:
+) -> tuple[
+    int,
+    list[dict],
+]:
     total_lidos = 0
     registros = []
 
     with ZipFile(
-        BytesIO(zip_bytes)
+        BytesIO(
+            zip_bytes
+        )
     ) as arquivo_zip:
 
-        for nome in arquivo_zip.namelist():
-            identificacao = identificar_arquivo(
-                nome,
+        for nome in (
+            arquivo_zip.namelist()
+        ):
+            identificacao = (
+                identificar_arquivo(
+                    nome
+                )
             )
 
             if identificacao is None:
                 continue
 
-            tipo, consolidado = identificacao
+            (
+                tipo,
+                consolidado,
+            ) = identificacao
 
-            conteudo = arquivo_zip.read(
-                nome,
+            conteudo = (
+                arquivo_zip.read(
+                    nome
+                )
             )
 
-            lidos, linhas = processar_csv(
+            (
+                lidos,
+                linhas,
+            ) = processar_csv(
                 conteudo=conteudo,
                 nome_arquivo=nome,
                 documento=documento,
                 ano=ano,
                 tipo=tipo,
-                consolidado=consolidado,
+                consolidado=(
+                    consolidado
+                ),
                 universo=universo,
             )
 
-            total_lidos += lidos
-            registros.extend(
-                linhas,
+            total_lidos += (
+                lidos
             )
 
-    registros = preferir_consolidado(
-        registros,
+            registros.extend(
+                linhas
+            )
+
+    registros = (
+        preferir_consolidado(
+            registros
+        )
     )
 
     return (
@@ -814,6 +1024,7 @@ def gravar_documento(
     ano: int,
     registros: list[dict],
 ) -> int:
+
     fonte = FONTES[
         documento
     ]
@@ -831,12 +1042,14 @@ def gravar_documento(
     )
 
     with conn.cursor() as cur:
-        # A carga do ano é substitutiva.
-        # Isso torna a rotina idempotente e
-        # absorve reapresentações da CVM.
+
+        # A carga anual é substitutiva.
+        # Isso torna a rotina idempotente
+        # e absorve reapresentações da CVM.
         cur.execute(
             """
-            delete from investimento.demonstracoes_financeiras
+            delete
+            from investimento.demonstracoes_financeiras
             where fonte = %s
               and data_referencia >= %s
               and data_referencia < %s
@@ -868,17 +1081,33 @@ def gravar_documento(
                     fonte
                 )
                 values (
-                    %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    %s, %s, %s, %s,
-                    null, %s
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    null,
+                    %s
                 )
                 """,
                 [
                     (
-                        r["ativo_id"],
-                        r["cnpj"],
-                        r["codigo_cvm"],
+                        r[
+                            "ativo_id"
+                        ],
+                        r[
+                            "cnpj"
+                        ],
+                        r[
+                            "codigo_cvm"
+                        ],
                         r[
                             "data_referencia"
                         ],
@@ -888,15 +1117,27 @@ def gravar_documento(
                         r[
                             "tipo_demonstracao"
                         ],
-                        r["codigo_conta"],
+                        r[
+                            "codigo_conta"
+                        ],
                         r[
                             "descricao_conta"
                         ],
-                        r["valor"],
-                        r["moeda"],
-                        r["consolidado"],
-                        r["documento"],
-                        r["fonte"],
+                        r[
+                            "valor"
+                        ],
+                        r[
+                            "moeda"
+                        ],
+                        r[
+                            "consolidado"
+                        ],
+                        r[
+                            "documento"
+                        ],
+                        r[
+                            "fonte"
+                        ],
                     )
                     for r in registros
                 ],
@@ -911,10 +1152,17 @@ def coletar(
     conn,
     ano: int,
     documento: str = "AMBOS",
-) -> tuple[int, int]:
-    documento = documento.upper()
+) -> tuple[
+    int,
+    int,
+]:
+
+    documento = (
+        documento.upper()
+    )
 
     if documento == "AMBOS":
+
         documentos = [
             "DFP",
             "ITR",
@@ -924,17 +1172,23 @@ def coletar(
         "DFP",
         "ITR",
     }:
+
         documentos = [
-            documento,
+            documento
         ]
 
     else:
         raise ValueError(
-            "documento deve ser DFP, ITR ou AMBOS"
+            (
+                "documento deve ser "
+                "DFP, ITR ou AMBOS"
+            )
         )
 
-    universo = carregar_universo(
-        conn,
+    universo = (
+        carregar_universo(
+            conn
+        )
     )
 
     if not universo:
@@ -943,20 +1197,27 @@ def coletar(
         )
 
     print(
-        f"Universo CVM carregado: "
-        f"{len(universo)} companhias."
+        (
+            "Universo CVM carregado: "
+            f"{len(universo)} "
+            "companhias."
+        )
     )
 
     total_lidos = 0
     total_gravados = 0
 
     for doc in documentos:
+
         zip_bytes = baixar_zip(
             doc,
             ano,
         )
 
-        lidos, registros = extrair_documento(
+        (
+            lidos,
+            registros,
+        ) = extrair_documento(
             zip_bytes=zip_bytes,
             documento=doc,
             ano=ano,
@@ -970,13 +1231,20 @@ def coletar(
             registros=registros,
         )
 
-        total_lidos += lidos
-        total_gravados += gravados
+        total_lidos += (
+            lidos
+        )
+
+        total_gravados += (
+            gravados
+        )
 
         print(
-            f"{doc} {ano}: "
-            f"lidos={lidos} | "
-            f"gravados={gravados}"
+            (
+                f"{doc} {ano}: "
+                f"lidos={lidos} | "
+                f"gravados={gravados}"
+            )
         )
 
     return (
