@@ -613,11 +613,11 @@ def materializar_resultados(
 
                     jsonb_build_object(
                         'modelo',
-                        %s,
+                        %s::text,
                         'origem',
                         'PILARES_MATERIALIZADOS',
                         'data_materializacao',
-                        %s
+                        %s::date
                     ),
 
                     now()
