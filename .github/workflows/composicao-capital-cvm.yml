@@ -1,0 +1,66 @@
+name: CVM - Composição do Capital
+
+on:
+  workflow_dispatch:
+    inputs:
+      ano:
+        description: "Ano opcional, ex.: 2026"
+        required: false
+        type: string
+
+      documento:
+        description: "Documento CVM"
+        required: true
+        type: choice
+        default: AMBOS
+        options:
+          - AMBOS
+          - DFP
+          - ITR
+
+  schedule:
+    # Segunda-feira às 09:15 no horário de Brasília.
+    - cron: "15 12 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: composicao-capital-cvm
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Coletar composição do capital CVM
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANO_MANUAL: ${{ inputs.ano }}
+          DOCUMENTO_MANUAL: ${{ inputs.documento }}
+
+        run: |
+          DOC="${DOCUMENTO_MANUAL:-AMBOS}"
+
+          if [ -n "$ANO_MANUAL" ]; then
+            python -m src.jobs.coletar_composicao_capital_cvm \
+              --ano "$ANO_MANUAL" \
+              --documento "$DOC"
+          else
+            python -m src.jobs.coletar_composicao_capital_cvm \
+              --documento "$DOC"
+          fi
