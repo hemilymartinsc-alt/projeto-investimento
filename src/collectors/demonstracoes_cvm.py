@@ -40,8 +40,9 @@ TIPOS_ACEITOS = {
 }
 
 # Mantemos apenas contas necessárias ao motor.
-# 2.07 e 2.07.01 foram incluídas para instituições
-# financeiras que usam a estrutura específica de BPP.
+# Instituições financeiras podem deslocar o patrimônio líquido
+# entre 2.07, 2.08 ou 2.09 conforme o elenco contábil usado.
+# Mantemos os candidatos e o cálculo identifica o PL pela descrição.
 CONTAS_RELEVANTES = {
     "BPA": {
         "1",
@@ -68,6 +69,10 @@ CONTAS_RELEVANTES = {
         "2.03.05",
         "2.07",
         "2.07.01",
+        "2.08",
+        "2.08.01",
+        "2.09",
+        "2.09.01",
     },
     "DRE": {
         "3.01",
