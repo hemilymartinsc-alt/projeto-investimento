@@ -3,7 +3,7 @@ name: B3 - Coletar Programas de BDR
 on:
   workflow_dispatch:
   schedule:
-    # 11:10 UTC = 08:10 em Brasília (UTC-3), de segunda a sexta.
+    # 11:10 UTC = 08:10 em Brasília (UTC-3).
     - cron: "10 11 * * 1-5"
 
 permissions:
@@ -33,10 +33,12 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
 
-      - name: Testar coletor BDR
-        run: python -m pytest -q tests/test_coletar_b3_programas_bdr.py
+      - name: Validar coletor BDR
+        run: |
+          python -m pytest -q tests/test_coletar_b3_programas_bdr.py
+          python -m py_compile src/jobs/coletar_b3_programas_bdr_operacional.py
 
-      - name: Coletar programas oficiais de BDR do Banco B3
+      - name: Coletar programas oficiais de BDR
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python -m src.jobs.coletar_b3_programas_bdr
+        run: python -m src.jobs.coletar_b3_programas_bdr_operacional
