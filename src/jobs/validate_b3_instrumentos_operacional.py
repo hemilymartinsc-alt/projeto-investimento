@@ -5,6 +5,7 @@ from src.jobs import validate_b3_instrumentos as base
 
 FINANCING_RATE_NAME = "TAXA DE FINANCIAMENTO"
 FINANCING_RATE_VARIANT = "FINANCING_RATE"
+SUFFIX_G_VARIANT = "SUFFIX_G_DUPLICATE"
 
 _original_canonical_decision = base.canonical_decision
 _original_preliminary_classification = (
@@ -16,6 +17,7 @@ _original_load_latest_valid_snapshot_profile = (
 _original_validate_snapshot_sanity = (
     base.validate_snapshot_sanity
 )
+_original_annotate_universe = base.annotate_universe
 _original_save_snapshot = base.save_snapshot
 
 
@@ -88,6 +90,44 @@ def preliminary_classification(inst):
         return "BDR", "UNIT_BDR"
 
     return _original_preliminary_classification(inst)
+
+
+def annotate_universe(instruments, ref):
+    """
+    Aplica as regras originais e remove duplicatas técnicas
+    terminadas em G quando existe o ticker-base com o mesmo ISIN.
+    """
+    result = _original_annotate_universe(
+        instruments,
+        ref,
+    )
+
+    canonical_keys = {
+        (
+            base.upper(inst.get("ticker")),
+            base.upper(inst.get("isin")),
+        )
+        for inst in result
+        if inst.get("instrumento_canonico") is True
+    }
+
+    for inst in result:
+        ticker = base.upper(inst.get("ticker")) or ""
+        isin = base.upper(inst.get("isin"))
+
+        if (
+            inst.get("instrumento_canonico") is True
+            and len(ticker) >= 2
+            and ticker.endswith("G")
+            and ticker[-2].isdigit()
+            and (ticker[:-1], isin) in canonical_keys
+        ):
+            inst["instrumento_canonico"] = False
+            inst["tipo_variante_b3"] = SUFFIX_G_VARIANT
+            inst["ticker_canonico"] = ticker[:-1]
+            inst["em_escopo_mestre"] = False
+
+    return result
 
 
 def _previous_financing_rate_counts(conn):
@@ -211,11 +251,8 @@ def validate_snapshot_sanity(
     ref=None,
 ):
     """
-    Valida o arquivo integral em memória.
-
-    O snapshot anterior contém apenas instrumentos canônicos.
-    Portanto, ele não pode ser comparado com o volume bruto
-    do arquivo integral da B3.
+    Valida o arquivo integral em memória sem comparar seu
+    volume bruto com o snapshot canônico reduzido.
     """
     comparable_profile = previous_profile
 
@@ -226,9 +263,6 @@ def validate_snapshot_sanity(
             "total_registros_persistidos"
         ] = previous_profile.get("total_registros")
 
-        # Impede a comparação incorreta:
-        # aproximadamente 2.400 canônicos armazenados
-        # contra mais de 100 mil registros brutos em memória.
         comparable_profile["total_registros"] = None
 
     return _original_validate_snapshot_sanity(
@@ -239,12 +273,69 @@ def validate_snapshot_sanity(
     )
 
 
+def _correct_suffix_g_variants(
+    conn,
+    instruments,
+    ref,
+):
+    variants = [
+        inst
+        for inst in instruments
+        if inst.get("tipo_variante_b3")
+        == SUFFIX_G_VARIANT
+    ]
+
+    if not variants:
+        return 0
+
+    updated = 0
+
+    with conn.cursor() as cur:
+        for inst in variants:
+            cur.execute(
+                """
+                update investimento.ativos
+                   set ativo = false,
+                       instrumento_canonico = false,
+                       tipo_variante_b3 = %s,
+                       ticker_canonico = %s,
+                       elegivel_analise = false,
+                       status_validacao = 'NAO_CANONICO',
+                       motivo_exclusao =
+                           'Duplicata técnica com sufixo G e '
+                           'mesmo ISIN do ticker canônico.',
+                       fonte_validacao = %s,
+                       validado_em = now(),
+                       atividade_confirmada_b3 = false,
+                       status_atividade_b3 =
+                           'VARIANTE_NAO_CANONICA',
+                       motivo_atividade_b3 =
+                           'SUFFIX_G_DUPLICATE',
+                       data_referencia_b3 = %s,
+                       verificado_b3_em = now(),
+                       atualizado_em = now()
+                 where upper(trim(ticker)) = %s
+                   and upper(trim(isin)) = %s
+                """,
+                (
+                    SUFFIX_G_VARIANT,
+                    inst.get("ticker_canonico"),
+                    base.SOURCE_CODE,
+                    ref,
+                    base.upper(inst.get("ticker")),
+                    base.upper(inst.get("isin")),
+                ),
+            )
+
+            updated += cur.rowcount
+
+    return updated
+
+
 def save_snapshot(conn, instruments, ref):
     """
     Envia ao Supabase somente instrumentos canônicos.
-
-    O arquivo integral permanece apenas na memória temporária
-    do GitHub Actions e não é armazenado no banco.
+    O arquivo integral existe apenas na memória temporária.
     """
     canonical_instruments = [
         inst
@@ -261,7 +352,8 @@ def save_snapshot(conn, instruments, ref):
         "redução antes do Supabase: "
         f"arquivo_integral={len(instruments)} "
         f"instrumentos_canonicos={len(canonical_instruments)} "
-        f"descartados={len(instruments) - len(canonical_instruments)}"
+        f"descartados="
+        f"{len(instruments) - len(canonical_instruments)}"
     )
 
     inserted = _original_save_snapshot(
@@ -270,9 +362,12 @@ def save_snapshot(conn, instruments, ref):
         ref,
     )
 
-    # A tabela representa o estado atual, e não um histórico diário.
-    # A exclusão ocorre na mesma transação: se alguma etapa falhar,
-    # todo o processo será desfeito automaticamente.
+    corrected_variants = _correct_suffix_g_variants(
+        conn,
+        instruments,
+        ref,
+    )
+
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -281,12 +376,14 @@ def save_snapshot(conn, instruments, ref):
             """,
             (ref,),
         )
+
         removed_old_rows = cur.rowcount
 
     base.progress(
         "retenção do snapshot aplicada: "
         f"linhas_atuais={inserted} "
-        f"linhas_antigas_removidas={removed_old_rows}"
+        f"linhas_antigas_removidas={removed_old_rows} "
+        f"variantes_g_corrigidas={corrected_variants}"
     )
 
     return inserted
@@ -297,6 +394,7 @@ def main():
     base.preliminary_classification = (
         preliminary_classification
     )
+    base.annotate_universe = annotate_universe
     base.load_latest_valid_snapshot_profile = (
         load_latest_valid_snapshot_profile
     )
