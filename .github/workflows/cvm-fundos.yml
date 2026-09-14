@@ -3,7 +3,7 @@ name: CVM - Coletar Cadastro de Fundos
 on:
   workflow_dispatch:
   schedule:
-    # 10:30 UTC = 07:30 em Brasília (UTC-3), de segunda a sexta.
+    # 10:30 UTC = 07:30 em Brasília, de segunda a sexta.
     - cron: "30 10 * * 1-5"
 
 permissions:
@@ -29,9 +29,14 @@ jobs:
           cache: "pip"
 
       - name: Instalar dependências
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Testar coletor CVM
+        run: python -m pytest -q tests/test_coletar_cvm_fundos.py
 
       - name: Coletar cadastro oficial de fundos da CVM
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python -m src.jobs.coletar_cvm_fundos
+        run: python -m src.jobs.coletar_cvm_fundos_operacional
